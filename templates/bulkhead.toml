@@ -1,0 +1,50 @@
+name = "Bulkhead Agent Sandbox"
+workspace_folder = "/workspace"
+remote_user = "__BULKHEAD_REMOTE_USER__"
+
+features = ["ghcr.io/devcontainers/features/github-cli:1"]
+run_args = []
+
+[build]
+dockerfile = ".devcontainer/Dockerfile"
+context = ".devcontainer"
+
+[git]
+enabled = true
+
+[build_args]
+TZ = "${localEnv:TZ:UTC}"
+
+[container_env]
+NPM_CONFIG_IGNORE_SCRIPTS = "true"
+NPM_CONFIG_AUDIT = "true"
+NPM_CONFIG_FUND = "false"
+NPM_CONFIG_SAVE_EXACT = "true"
+NPM_CONFIG_UPDATE_NOTIFIER = "false"
+NPM_CONFIG_MINIMUM_RELEASE_AGE = "1440"
+PIP_DISABLE_PIP_VERSION_CHECK = "1"
+PYTHONDONTWRITEBYTECODE = "1"
+UV_LINK_MODE = "copy"
+
+[[volume]]
+name = "history"
+target = "/commandhistory"
+
+# Bulkhead always mounts the current directory read-write at `/workspace`, so the
+# code you run in the container can fully modify the repo you launched from.
+# Add more host paths only when you want them. `source` may be absolute,
+# relative to the workspace root, or use `~/...`. `access` defaults to "ro" if
+# omitted.
+# The managed `[git]` block above mounts your host `~/.gitconfig` read-only at
+# the remote user's home directory.
+# The default build files are a Rust-heavy setup that reflects the maintainer's
+# workflow. To use your own Dockerfile instead of the bundled template, point
+# `[build].dockerfile` and `[build].context` at files in your repo.
+#
+# [[path]]
+# source = "~/drop"
+# target = "/drop"
+# access = "rw"
+#
+# Bulkhead always adds read-only mounts for `.devcontainer` and `bulkhead.toml`
+# automatically, so you do not need to declare them here.

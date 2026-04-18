@@ -1,0 +1,45 @@
+name = "Bulkhead Audit Sandbox"
+workspace_folder = "/workspace"
+remote_user = "__BULKHEAD_REMOTE_USER__"
+
+features = ["ghcr.io/devcontainers/features/github-cli:1"]
+run_args = ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"]
+
+[build]
+dockerfile = ".devcontainer/Dockerfile"
+context = ".devcontainer"
+
+[git]
+enabled = true
+
+[build_args]
+TZ = "${localEnv:TZ:UTC}"
+
+[container_env]
+NPM_CONFIG_IGNORE_SCRIPTS = "true"
+NPM_CONFIG_AUDIT = "true"
+NPM_CONFIG_FUND = "false"
+NPM_CONFIG_SAVE_EXACT = "true"
+NPM_CONFIG_UPDATE_NOTIFIER = "false"
+NPM_CONFIG_MINIMUM_RELEASE_AGE = "1440"
+PIP_DISABLE_PIP_VERSION_CHECK = "1"
+PYTHONDONTWRITEBYTECODE = "1"
+UV_LINK_MODE = "copy"
+
+[[volume]]
+name = "history"
+target = "/commandhistory"
+
+# Audit preset:
+# - current directory is writable in-container
+# - extra host exposure stays opt-in
+# - NET_ADMIN and NET_RAW are enabled for iptables and related tooling
+# - host `~/.gitconfig` is mounted read-only via the managed `[git]` block
+# - the bundled Dockerfile is Rust-oriented by default, but `[build]` can point
+#   at another Dockerfile and build context in the repo
+# - Bulkhead still adds read-only mounts for `.devcontainer` and `bulkhead.toml`
+#
+# [[path]]
+# source = "~/drop"
+# target = "/drop"
+# access = "rw"

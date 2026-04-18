@@ -31,7 +31,14 @@ Prerequisites:
 - a Docker runtime such as Docker Desktop, OrbStack, or Colima
 - the Dev Container CLI
 
-Build and install the binary from this repo:
+Install with Homebrew:
+
+```bash
+brew tap pmembrey/bulkhead
+brew install bulkhead
+```
+
+Or build and install the binary from this repo:
 
 ```bash
 cargo install --path .

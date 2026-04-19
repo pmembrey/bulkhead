@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DOCKERFILE: &str = include_str!("../../templates/Dockerfile");
+const POST_CREATE_SCRIPT: &str = include_str!("../../templates/bulkhead-post-create.sh");
 
 pub(crate) fn template(
     directory: Option<PathBuf>,
@@ -323,7 +324,12 @@ fn write_workspace_template(workspace: &Path, preset: Preset, force: bool) -> Re
     let devcontainer_dir = workspace.join(".devcontainer");
     let bulkhead_toml_path = config_path(workspace);
     let dockerfile_path = devcontainer_dir.join("Dockerfile");
-    let files = [&bulkhead_toml_path, &dockerfile_path];
+    let post_create_script_path = devcontainer_dir.join("bulkhead-post-create.sh");
+    let files = [
+        &bulkhead_toml_path,
+        &dockerfile_path,
+        &post_create_script_path,
+    ];
 
     if !force {
         for path in files {
@@ -346,6 +352,8 @@ fn write_workspace_template(workspace: &Path, preset: Preset, force: bool) -> Re
     .with_context(|| format!("failed to write {}", bulkhead_toml_path.display()))?;
     fs::write(&dockerfile_path, DOCKERFILE)
         .with_context(|| format!("failed to write {}", dockerfile_path.display()))?;
+    fs::write(&post_create_script_path, POST_CREATE_SCRIPT)
+        .with_context(|| format!("failed to write {}", post_create_script_path.display()))?;
 
     render_workspace_devcontainer(workspace)
 }

@@ -109,6 +109,7 @@ Example:
 name = "Bulkhead Agent Sandbox"
 workspace_folder = "/workspace"
 remote_user = "miggyx"
+agents = ["claude", "codex"]
 
 [build]
 dockerfile = ".devcontainer/Dockerfile"
@@ -130,6 +131,12 @@ A few important points:
 - `[build]` points at the Dockerfile and build context to use, relative to the workspace root
 - the bundled Dockerfile is Rust-oriented by default and keeps the base devcontainer bash setup intact, but you can point `[build]` at another Dockerfile in your repo if your workflow is different
 - if you replace the bundled Dockerfile, your custom build is responsible for creating whatever `remote_user` you configure
+- `agents` preinstalls supported agent CLIs inside the container and attaches persistent config volumes for them
+- currently supported agents are `claude` and `codex`
+- `claude` forwards `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from the host and persists config under `~/.claude` in the container
+- if `CLAUDE_CODE_OAUTH_TOKEN` is set, Bulkhead also tries to seed Claude auth during post-create so headless setup can avoid the browser login flow
+- if neither `ANTHROPIC_API_KEY` nor `CLAUDE_CODE_OAUTH_TOKEN` is set, expect a one-time Claude login inside the container; the persisted `~/.claude` volume keeps that auth state across rebuilds
+- `codex` forwards `OPENAI_API_KEY` from the host and persists config under `~/.codex` in the container
 - `[git]` is a dedicated managed feature for mounting host `~/.gitconfig` read-only into the container user's home
 - extra host paths live under `[[path]]`
 - `access` defaults to read-only unless you explicitly request write access

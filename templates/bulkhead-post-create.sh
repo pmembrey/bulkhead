@@ -17,6 +17,35 @@ has_agent() {
   esac
 }
 
+run_privileged() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+ensure_writable_dir() {
+  local dir="$1"
+  local owner
+
+  if [[ ! -d "${dir}" ]]; then
+    mkdir -p "${dir}" 2>/dev/null || run_privileged mkdir -p "${dir}"
+  fi
+
+  if [[ -w "${dir}" ]]; then
+    return 0
+  fi
+
+  owner="$(id -u):$(id -g)"
+  run_privileged chown -R "${owner}" "${dir}"
+
+  if [[ ! -w "${dir}" ]]; then
+    echo "bulkhead: ${dir} is still not writable after fixing ownership." >&2
+    return 1
+  fi
+}
+
 ensure_npm() {
   if command -v npm >/dev/null 2>&1; then
     return 0
@@ -68,7 +97,7 @@ configure_claude() {
 
   claude_dir="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
   settings_file="${claude_dir}/settings.json"
-  mkdir -p "${claude_dir}"
+  ensure_writable_dir "${claude_dir}"
 
   tmp_file="$(mktemp)"
   if [[ -f "${settings_file}" ]] && jq \
@@ -141,12 +170,13 @@ bootstrap_claude_auth() {
 }
 
 if has_agent "claude"; then
+  ensure_writable_dir "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
   install_npm_agent "@anthropic-ai/claude-code" "claude"
   bootstrap_claude_auth
   configure_claude
 fi
 
 if has_agent "codex"; then
-  mkdir -p "${HOME}/.codex"
+  ensure_writable_dir "${HOME}/.codex"
   install_npm_agent "@openai/codex" "codex"
 fi

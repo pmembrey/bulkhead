@@ -134,7 +134,8 @@ A few important points:
 - `agents` preinstalls supported agent CLIs inside the container and attaches persistent config volumes for them
 - currently supported agents are `claude` and `codex`
 - `claude` forwards `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from the host and persists config under `~/.claude` in the container
-- if `CLAUDE_CODE_OAUTH_TOKEN` is set, Bulkhead also seeds Claude's auth state during post-create so headless container setup can skip the onboarding wizard
+- if `CLAUDE_CODE_OAUTH_TOKEN` is set, Bulkhead also tries to seed Claude auth during post-create so headless setup can avoid the browser login flow
+- if neither `ANTHROPIC_API_KEY` nor `CLAUDE_CODE_OAUTH_TOKEN` is set, expect a one-time Claude login inside the container; the persisted `~/.claude` volume keeps that auth state across rebuilds
 - `codex` forwards `OPENAI_API_KEY` from the host and persists config under `~/.codex` in the container
 - `[git]` is a dedicated managed feature for mounting host `~/.gitconfig` read-only into the container user's home
 - extra host paths live under `[[path]]`

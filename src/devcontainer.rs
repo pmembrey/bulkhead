@@ -1,6 +1,6 @@
 use crate::config::{
-    BulkheadConfig, MountAccess, config_path, devcontainer_relative_path, gitconfig_target,
-    home_dir, is_docker_socket_path, load_bulkhead_config, resolve_mount_source,
+    BulkheadConfig, MountAccess, PreinstalledAgent, config_path, devcontainer_relative_path,
+    gitconfig_target, home_dir, is_docker_socket_path, load_bulkhead_config, resolve_mount_source,
     resolve_path_for_policy_checks, resolve_plain_host_path, resolve_workspace_config_path,
     sanitize_volume_name,
 };
@@ -13,6 +13,8 @@ use std::path::Path;
 
 const DEVCONTAINER_SCHEMA: &str =
     "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json";
+const NODE_FEATURE: &str = "ghcr.io/devcontainers/features/node:1";
+const POST_CREATE_SCRIPT_NAME: &str = "bulkhead-post-create.sh";
 
 #[derive(Debug, Serialize)]
 pub(crate) struct GeneratedDevcontainer {
@@ -33,9 +35,13 @@ pub(crate) struct GeneratedDevcontainer {
     mounts: Vec<String>,
     #[serde(rename = "containerEnv")]
     container_env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", rename = "remoteEnv")]
+    remote_env: BTreeMap<String, String>,
     customizations: Value,
     #[serde(skip_serializing_if = "Option::is_none", rename = "initializeCommand")]
     initialize_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "postCreateCommand")]
+    post_create_command: Option<String>,
     #[serde(rename = "workspaceMount")]
     workspace_mount: String,
     #[serde(rename = "workspaceFolder")]
@@ -98,6 +104,16 @@ pub(crate) fn ensure_workspace_layout(workspace: &Path) -> Result<()> {
         );
     }
 
+    if !config.agents.is_empty() {
+        let post_create_script = devcontainer_dir.join(POST_CREATE_SCRIPT_NAME);
+        if !post_create_script.is_file() {
+            bail!(
+                "missing {}. Run `bulkhead template --force` to restore the agent bootstrap script.",
+                post_create_script.display()
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -125,11 +141,6 @@ pub(crate) fn generate_devcontainer(
     let dockerfile_path = resolve_workspace_config_path(workspace, &config.build.dockerfile)?;
     let context_path = resolve_workspace_config_path(workspace, &config.build.context)?;
 
-    let mut features = BTreeMap::new();
-    for feature in &config.features {
-        features.insert(feature.clone(), json!({}));
-    }
-
     Ok(GeneratedDevcontainer {
         schema: DEVCONTAINER_SCHEMA,
         name: config.name.clone(),
@@ -138,7 +149,7 @@ pub(crate) fn generate_devcontainer(
             dockerfile: devcontainer_relative_path(workspace, &dockerfile_path)?,
             args: build_args(config),
         },
-        features,
+        features: build_features(config),
         run_args: config.run_args.clone(),
         init: true,
         update_remote_user_uid: true,
@@ -150,9 +161,11 @@ pub(crate) fn generate_devcontainer(
             &devcontainer_target,
             &bulkhead_config_target,
         )?,
-        container_env: config.container_env.clone(),
+        container_env: build_container_env(config),
+        remote_env: build_remote_env(config),
         customizations: default_customizations(),
         initialize_command: initialize_command(config),
+        post_create_command: post_create_command(config, &devcontainer_target),
         workspace_mount: format!(
             "source=${{localWorkspaceFolder}},target={workspace_folder},type=bind,consistency=delegated"
         ),
@@ -213,9 +226,29 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
     let home_dir = home_dir()?;
     let resolved_home_dir = resolve_path_for_policy_checks(&home_dir);
     let mut volume_names = BTreeSet::new();
+    let mut seen_agents = BTreeSet::new();
+
+    for key in reserved_container_env_keys(config) {
+        if config.container_env.contains_key(key) {
+            bail!("container_env.{key} is reserved for Bulkhead");
+        }
+    }
 
     if config.git.enabled && !targets.insert(git_target.clone()) {
         bail!("duplicate mount target {}", git_target);
+    }
+
+    for agent in &config.agents {
+        if !seen_agents.insert(*agent) {
+            bail!("duplicate agent {}", agent.as_str());
+        }
+
+        if !targets.insert(agent.config_target(&config.remote_user)) {
+            bail!(
+                "duplicate mount target {}",
+                agent.config_target(&config.remote_user)
+            );
+        }
     }
 
     for volume in &config.volume {
@@ -294,6 +327,80 @@ fn build_args(config: &BulkheadConfig) -> BTreeMap<String, String> {
     build_args
 }
 
+fn build_features(config: &BulkheadConfig) -> BTreeMap<String, Value> {
+    let mut features = BTreeMap::new();
+    for feature in &config.features {
+        features.insert(feature.clone(), json!({}));
+    }
+
+    if !config.agents.is_empty() && !features.contains_key(NODE_FEATURE) {
+        features.insert(NODE_FEATURE.to_owned(), json!({ "version": "22" }));
+    }
+
+    features
+}
+
+fn build_container_env(config: &BulkheadConfig) -> BTreeMap<String, String> {
+    let mut env = config.container_env.clone();
+
+    if !config.agents.is_empty() {
+        env.insert(
+            "BULKHEAD_SELECTED_AGENTS".to_owned(),
+            config
+                .agents
+                .iter()
+                .map(|agent| agent.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+
+    if config.agents.contains(&PreinstalledAgent::Claude) {
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_owned(),
+            PreinstalledAgent::Claude.config_target(&config.remote_user),
+        );
+        env.entry("DISABLE_AUTOUPDATER".to_owned())
+            .or_insert_with(|| "1".to_owned());
+    }
+
+    env
+}
+
+fn build_remote_env(config: &BulkheadConfig) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+
+    if !config.agents.is_empty() {
+        env.insert(
+            "PATH".to_owned(),
+            format!(
+                "{}/.local/bin:${{containerEnv:PATH}}",
+                remote_user_home(&config.remote_user)
+            ),
+        );
+    }
+
+    if config.agents.contains(&PreinstalledAgent::Claude) {
+        env.insert(
+            "ANTHROPIC_API_KEY".to_owned(),
+            "${localEnv:ANTHROPIC_API_KEY:}".to_owned(),
+        );
+        env.insert(
+            "CLAUDE_CODE_OAUTH_TOKEN".to_owned(),
+            "${localEnv:CLAUDE_CODE_OAUTH_TOKEN:}".to_owned(),
+        );
+    }
+
+    if config.agents.contains(&PreinstalledAgent::Codex) {
+        env.insert(
+            "OPENAI_API_KEY".to_owned(),
+            "${localEnv:OPENAI_API_KEY:}".to_owned(),
+        );
+    }
+
+    env
+}
+
 fn build_mounts(
     workspace: &Path,
     config: &BulkheadConfig,
@@ -315,6 +422,14 @@ fn build_mounts(
         mounts.push(format!(
             "source={source},target={},type=bind,readonly",
             gitconfig_target(&config.remote_user)
+        ));
+    }
+
+    for agent in &config.agents {
+        mounts.push(format!(
+            "source=bulkhead-${{localWorkspaceFolderBasename}}-{}-${{devcontainerId}},target={},type=volume",
+            agent.as_str(),
+            agent.config_target(&config.remote_user)
         ));
     }
 
@@ -345,6 +460,16 @@ fn initialize_command(config: &BulkheadConfig) -> Option<String> {
     None
 }
 
+fn post_create_command(config: &BulkheadConfig, devcontainer_target: &str) -> Option<String> {
+    if config.agents.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "bash {devcontainer_target}/{POST_CREATE_SCRIPT_NAME}"
+    ))
+}
+
 fn default_customizations() -> Value {
     json!({
         "vscode": {
@@ -362,6 +487,28 @@ fn default_customizations() -> Value {
             }
         }
     })
+}
+
+fn reserved_container_env_keys(config: &BulkheadConfig) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+
+    if !config.agents.is_empty() {
+        keys.push("BULKHEAD_SELECTED_AGENTS");
+    }
+
+    if config.agents.contains(&PreinstalledAgent::Claude) {
+        keys.push("CLAUDE_CONFIG_DIR");
+    }
+
+    keys
+}
+
+fn remote_user_home(remote_user: &str) -> String {
+    if remote_user == "root" {
+        "/root".to_owned()
+    } else {
+        format!("/home/{remote_user}")
+    }
 }
 
 pub(crate) fn normalize_container_path(path: &str) -> Result<String> {
@@ -403,6 +550,7 @@ mod tests {
         AGENT_PRESET_TOML, AUDIT_PRESET_TOML, BulkheadConfig, MINIMAL_PRESET_TOML,
         gitconfig_target, instantiate_template, load_inline_config,
     };
+    use serde_json::json;
     use std::path::Path;
 
     #[test]
@@ -537,5 +685,76 @@ context = ".bulkhead"
 
         assert_eq!(generated.build.dockerfile, "../.bulkhead/Dockerfile");
         assert_eq!(generated.build.context, "../.bulkhead");
+    }
+
+    #[test]
+    fn selected_agents_add_provider_mounts_and_env() {
+        let config = load_inline_config(
+            r#"
+remote_user = "agent"
+agents = ["claude", "codex"]
+"#,
+        )
+        .unwrap();
+
+        let generated = generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).unwrap();
+
+        assert_eq!(
+            generated.features.get(super::NODE_FEATURE),
+            Some(&json!({ "version": "22" }))
+        );
+        assert!(generated.mounts.iter().any(|mount| {
+            mount.contains("target=/home/agent/.claude") && mount.contains("type=volume")
+        }));
+        assert!(generated.mounts.iter().any(|mount| {
+            mount.contains("target=/home/agent/.codex") && mount.contains("type=volume")
+        }));
+        assert_eq!(
+            generated.container_env.get("BULKHEAD_SELECTED_AGENTS"),
+            Some(&"claude,codex".to_owned())
+        );
+        assert_eq!(
+            generated.container_env.get("CLAUDE_CONFIG_DIR"),
+            Some(&"/home/agent/.claude".to_owned())
+        );
+        assert_eq!(
+            generated.remote_env.get("OPENAI_API_KEY"),
+            Some(&"${localEnv:OPENAI_API_KEY:}".to_owned())
+        );
+        assert_eq!(
+            generated.remote_env.get("ANTHROPIC_API_KEY"),
+            Some(&"${localEnv:ANTHROPIC_API_KEY:}".to_owned())
+        );
+        assert_eq!(
+            generated.post_create_command,
+            Some("bash /workspace/.devcontainer/bulkhead-post-create.sh".to_owned())
+        );
+    }
+
+    #[test]
+    fn duplicate_agents_are_rejected() {
+        let config = load_inline_config(
+            r#"
+agents = ["claude", "claude"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn reserved_agent_container_env_keys_are_rejected() {
+        let config = load_inline_config(
+            r#"
+agents = ["claude"]
+
+[container_env]
+CLAUDE_CONFIG_DIR = "/tmp/claude"
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
     }
 }

@@ -24,6 +24,8 @@ pub(crate) struct BulkheadConfig {
     pub(crate) build: BuildConfig,
     #[serde(default)]
     pub(crate) git: GitConfigFeature,
+    #[serde(default)]
+    pub(crate) agents: Vec<PreinstalledAgent>,
     #[serde(default = "default_features")]
     pub(crate) features: Vec<String>,
     #[serde(default = "default_run_args")]
@@ -88,6 +90,13 @@ pub(crate) enum Preset {
     Agent,
     Audit,
     Minimal,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PreinstalledAgent {
+    Claude,
+    Codex,
 }
 
 pub(crate) fn load_bulkhead_config(workspace: &Path) -> Result<BulkheadConfig> {
@@ -428,6 +437,28 @@ impl Preset {
     }
 }
 
+impl PreinstalledAgent {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            PreinstalledAgent::Claude => "claude",
+            PreinstalledAgent::Codex => "codex",
+        }
+    }
+
+    pub(crate) fn config_target(self, remote_user: &str) -> String {
+        let home = if remote_user == "root" {
+            "/root".to_owned()
+        } else {
+            format!("/home/{remote_user}")
+        };
+
+        match self {
+            PreinstalledAgent::Claude => format!("{home}/.claude"),
+            PreinstalledAgent::Codex => format!("{home}/.codex"),
+        }
+    }
+}
+
 impl MountAccess {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -490,7 +521,7 @@ fn default_container_env() -> BTreeMap<String, String> {
 mod tests {
     use super::{
         AGENT_PRESET_TOML, AUDIT_PRESET_TOML, BulkheadConfig, MINIMAL_PRESET_TOML, MountAccess,
-        Preset, instantiate_template, load_inline_config, resolve_mount_access,
+        PreinstalledAgent, Preset, instantiate_template, load_inline_config, resolve_mount_access,
         upsert_path_mount_in_document,
     };
     use crate::devcontainer::validate_config;
@@ -572,5 +603,20 @@ access = "rw"
         assert_eq!(Preset::choices().len(), 3);
         let _ = AUDIT_PRESET_TOML;
         let _ = MINIMAL_PRESET_TOML;
+    }
+
+    #[test]
+    fn agents_parse_from_inline_config() {
+        let config = load_inline_config(
+            r#"
+agents = ["claude", "codex"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.agents,
+            vec![PreinstalledAgent::Claude, PreinstalledAgent::Codex]
+        );
     }
 }

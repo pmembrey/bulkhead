@@ -177,8 +177,12 @@ configure_claude() {
   if [[ -f "${settings_file}" ]] && jq \
     '.permissions = (.permissions // {}) | .permissions.defaultMode = "bypassPermissions"' \
     "${settings_file}" >"${tmp_file}" 2>/dev/null; then
-    mv "${tmp_file}" "${settings_file}"
-    return 0
+    if mv "${tmp_file}" "${settings_file}"; then
+      return 0
+    fi
+
+    rm -f "${tmp_file}"
+    return 1
   fi
 
   rm -f "${tmp_file}"
@@ -235,8 +239,12 @@ bootstrap_claude_auth() {
 
   tmp_file="$(mktemp)"
   if jq '.hasCompletedOnboarding = true' "${claude_json}" >"${tmp_file}" 2>/dev/null; then
-    mv "${tmp_file}" "${claude_json}"
-    return 0
+    if mv "${tmp_file}" "${claude_json}"; then
+      return 0
+    fi
+
+    rm -f "${tmp_file}"
+    return 1
   fi
 
   rm -f "${tmp_file}"

@@ -398,6 +398,17 @@ fn build_remote_env(config: &BulkheadConfig) -> BTreeMap<String, String> {
         );
     }
 
+    if config.agents.contains(&PreinstalledAgent::Pi) {
+        env.insert(
+            "ANTHROPIC_API_KEY".to_owned(),
+            "${localEnv:ANTHROPIC_API_KEY:}".to_owned(),
+        );
+        env.insert(
+            "OPENAI_API_KEY".to_owned(),
+            "${localEnv:OPENAI_API_KEY:}".to_owned(),
+        );
+    }
+
     env
 }
 
@@ -692,7 +703,7 @@ context = ".bulkhead"
         let config = load_inline_config(
             r#"
 remote_user = "agent"
-agents = ["claude", "codex"]
+agents = ["claude", "codex", "pi"]
 "#,
         )
         .unwrap();
@@ -709,9 +720,12 @@ agents = ["claude", "codex"]
         assert!(generated.mounts.iter().any(|mount| {
             mount.contains("target=/home/agent/.codex") && mount.contains("type=volume")
         }));
+        assert!(generated.mounts.iter().any(|mount| {
+            mount.contains("target=/home/agent/.pi") && mount.contains("type=volume")
+        }));
         assert_eq!(
             generated.container_env.get("BULKHEAD_SELECTED_AGENTS"),
-            Some(&"claude,codex".to_owned())
+            Some(&"claude,codex,pi".to_owned())
         );
         assert_eq!(
             generated.container_env.get("CLAUDE_CONFIG_DIR"),
@@ -728,6 +742,31 @@ agents = ["claude", "codex"]
         assert_eq!(
             generated.post_create_command,
             Some("bash /workspace/.devcontainer/bulkhead-post-create.sh".to_owned())
+        );
+    }
+
+    #[test]
+    fn pi_agent_adds_persistent_config_and_provider_envs() {
+        let config = load_inline_config(
+            r#"
+remote_user = "agent"
+agents = ["pi"]
+"#,
+        )
+        .unwrap();
+
+        let generated = generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).unwrap();
+
+        assert!(generated.mounts.iter().any(|mount| {
+            mount.contains("target=/home/agent/.pi") && mount.contains("type=volume")
+        }));
+        assert_eq!(
+            generated.remote_env.get("OPENAI_API_KEY"),
+            Some(&"${localEnv:OPENAI_API_KEY:}".to_owned())
+        );
+        assert_eq!(
+            generated.remote_env.get("ANTHROPIC_API_KEY"),
+            Some(&"${localEnv:ANTHROPIC_API_KEY:}".to_owned())
         );
     }
 

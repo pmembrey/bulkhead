@@ -38,7 +38,7 @@ target = "/commandhistory"
 # omitted.
 # The managed `[git]` block above mounts your host `~/.gitconfig` read-only at
 # the remote user's home directory.
-# Set `agents = ["claude", "codex"]` to preinstall supported agent CLIs and
+# Set `agents = ["claude", "codex", "pi"]` to preinstall supported agent CLIs and
 # attach persistent config volumes for them inside the container.
 # The default build files are a Rust-heavy setup that reflects the maintainer's
 # workflow. To use your own Dockerfile instead of the bundled template, point

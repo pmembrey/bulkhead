@@ -2,12 +2,14 @@
 set -euo pipefail
 
 selected_agents="${BULKHEAD_SELECTED_AGENTS:-}"
+readonly NVM_VERSION="v0.40.4"
 
 if [[ -z "${selected_agents}" ]]; then
   exit 0
 fi
 
 export PATH="${HOME}/.local/bin:${PATH}"
+export NVM_DIR="${HOME}/.nvm"
 mkdir -p "${HOME}/.local/bin"
 
 has_agent() {
@@ -55,19 +57,19 @@ ensure_npm() {
   return 1
 }
 
-ensure_global_binary_on_path() {
-  local command_name="$1"
-  local global_bin local_bin
+ensure_local_binary_link() {
+  local source_path="$1"
+  local command_name="$2"
+  local local_bin
 
-  global_bin="$(npm prefix -g)/bin/${command_name}"
   local_bin="${HOME}/.local/bin/${command_name}"
 
-  if [[ ! -x "${global_bin}" ]]; then
-    echo "bulkhead: expected npm-installed binary ${global_bin} for ${command_name}, but it was not found or is not executable." >&2
+  if [[ ! -x "${source_path}" ]]; then
+    echo "bulkhead: expected executable ${source_path} for ${command_name}, but it was not found or is not executable." >&2
     return 1
   fi
 
-  ln -sf "${global_bin}" "${local_bin}"
+  ln -sf "${source_path}" "${local_bin}"
 
   if [[ ! -x "${local_bin}" ]]; then
     echo "bulkhead: failed to link ${command_name} into ${local_bin}." >&2
@@ -75,13 +77,23 @@ ensure_global_binary_on_path() {
   fi
 }
 
+ensure_global_binary_on_path() {
+  local command_name="$1"
+  local global_bin
+
+  global_bin="$(npm prefix -g)/bin/${command_name}"
+  ensure_local_binary_link "${global_bin}" "${command_name}"
+}
+
 install_npm_agent() {
   local package_name="$1"
   local command_name="$2"
+  local global_bin
 
   ensure_npm
+  global_bin="$(npm prefix -g)/bin/${command_name}"
 
-  if ! command -v "${command_name}" >/dev/null 2>&1; then
+  if [[ ! -x "${global_bin}" ]]; then
     env \
       NPM_CONFIG_AUDIT=false \
       NPM_CONFIG_FUND=false \
@@ -90,6 +102,68 @@ install_npm_agent() {
   fi
 
   ensure_global_binary_on_path "${command_name}"
+}
+
+ensure_nvm_shell_init() {
+  local bashrc marker
+
+  bashrc="${HOME}/.bashrc"
+  marker="# >>> bulkhead nvm >>>"
+
+  if grep -Fq "${marker}" "${bashrc}" 2>/dev/null; then
+    return 0
+  fi
+
+  cat >>"${bashrc}" <<'EOF'
+# >>> bulkhead nvm >>>
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+# <<< bulkhead nvm <<<
+EOF
+}
+
+load_nvm() {
+  if [[ ! -s "${NVM_DIR}/nvm.sh" ]]; then
+    echo "bulkhead: nvm was expected at ${NVM_DIR}/nvm.sh but is missing." >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC1090
+  . "${NVM_DIR}/nvm.sh"
+}
+
+install_nvm() {
+  if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
+    ensure_nvm_shell_init
+    load_nvm
+    return 0
+  fi
+
+  curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | PROFILE=/dev/null bash
+  ensure_nvm_shell_init
+  load_nvm
+}
+
+link_nvm_runtime_binaries() {
+  local node_bin_dir
+
+  node_bin_dir="$(dirname "$(nvm which current)")"
+  ensure_local_binary_link "${node_bin_dir}/node" "node"
+  ensure_local_binary_link "${node_bin_dir}/npm" "npm"
+  ensure_local_binary_link "${node_bin_dir}/npx" "npx"
+
+  if [[ -x "${node_bin_dir}/corepack" ]]; then
+    ensure_local_binary_link "${node_bin_dir}/corepack" "corepack"
+  fi
+}
+
+ensure_latest_nvm_node() {
+  install_nvm
+  nvm install node --latest-npm
+  nvm alias default node >/dev/null
+  nvm use default >/dev/null
+  link_nvm_runtime_binaries
 }
 
 configure_claude() {
@@ -103,8 +177,12 @@ configure_claude() {
   if [[ -f "${settings_file}" ]] && jq \
     '.permissions = (.permissions // {}) | .permissions.defaultMode = "bypassPermissions"' \
     "${settings_file}" >"${tmp_file}" 2>/dev/null; then
-    mv "${tmp_file}" "${settings_file}"
-    return 0
+    if mv "${tmp_file}" "${settings_file}"; then
+      return 0
+    fi
+
+    rm -f "${tmp_file}"
+    return 1
   fi
 
   rm -f "${tmp_file}"
@@ -161,13 +239,23 @@ bootstrap_claude_auth() {
 
   tmp_file="$(mktemp)"
   if jq '.hasCompletedOnboarding = true' "${claude_json}" >"${tmp_file}" 2>/dev/null; then
-    mv "${tmp_file}" "${claude_json}"
-    return 0
+    if mv "${tmp_file}" "${claude_json}"; then
+      return 0
+    fi
+
+    rm -f "${tmp_file}"
+    return 1
   fi
 
   rm -f "${tmp_file}"
   echo "bulkhead: ${claude_json} was not valid JSON after auth bootstrap; onboarding bypass skipped." >&2
 }
+
+if has_agent "pi"; then
+  mkdir -p "${HOME}/.pi"
+  ensure_latest_nvm_node
+  install_npm_agent "@mariozechner/pi-coding-agent" "pi"
+fi
 
 if has_agent "claude"; then
   ensure_writable_dir "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"

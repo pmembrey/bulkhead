@@ -36,7 +36,7 @@ target = "/commandhistory"
 # - extra host exposure stays opt-in
 # - NET_ADMIN and NET_RAW are enabled for iptables and related tooling
 # - host `~/.gitconfig` is mounted read-only via the managed `[git]` block
-# - set `agents = ["claude", "codex"]` to preinstall supported agent CLIs
+# - set `agents = ["claude", "codex", "pi"]` to preinstall supported agent CLIs
 # - the bundled Dockerfile is Rust-oriented by default, but `[build]` can point
 #   at another Dockerfile and build context in the repo
 # - Bulkhead still adds read-only mounts for `.devcontainer` and `bulkhead.toml`

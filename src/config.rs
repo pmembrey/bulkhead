@@ -97,6 +97,7 @@ pub(crate) enum Preset {
 pub(crate) enum PreinstalledAgent {
     Claude,
     Codex,
+    Pi,
 }
 
 pub(crate) fn load_bulkhead_config(workspace: &Path) -> Result<BulkheadConfig> {
@@ -442,6 +443,7 @@ impl PreinstalledAgent {
         match self {
             PreinstalledAgent::Claude => "claude",
             PreinstalledAgent::Codex => "codex",
+            PreinstalledAgent::Pi => "pi",
         }
     }
 
@@ -455,6 +457,7 @@ impl PreinstalledAgent {
         match self {
             PreinstalledAgent::Claude => format!("{home}/.claude"),
             PreinstalledAgent::Codex => format!("{home}/.codex"),
+            PreinstalledAgent::Pi => format!("{home}/.pi"),
         }
     }
 }
@@ -609,14 +612,18 @@ access = "rw"
     fn agents_parse_from_inline_config() {
         let config = load_inline_config(
             r#"
-agents = ["claude", "codex"]
+agents = ["claude", "codex", "pi"]
 "#,
         )
         .unwrap();
 
         assert_eq!(
             config.agents,
-            vec![PreinstalledAgent::Claude, PreinstalledAgent::Codex]
+            vec![
+                PreinstalledAgent::Claude,
+                PreinstalledAgent::Codex,
+                PreinstalledAgent::Pi
+            ]
         );
     }
 }

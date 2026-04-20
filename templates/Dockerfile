@@ -7,6 +7,8 @@ ENV TZ="${TZ}" \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:${PATH}
 
+ARG BULKHEAD_RUST_TOOLCHAIN=1.95.0
+
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path && \
+    sh -s -- -y --profile minimal --default-toolchain "${BULKHEAD_RUST_TOOLCHAIN}" --no-modify-path && \
     cargo install --locked zellij && \
     rustup component add rustfmt clippy && \
     chmod -R a+rwX /usr/local/rustup /usr/local/cargo

@@ -26,10 +26,10 @@ pub(crate) fn prompt_preset_selection(default: Preset) -> Result<Preset> {
         return Ok(default);
     }
 
-    if let Ok(index) = choice.parse::<usize>() {
-        if let Some(preset) = Preset::choices().get(index.saturating_sub(1)) {
-            return Ok(*preset);
-        }
+    if let Ok(index) = choice.parse::<usize>()
+        && let Some(preset) = Preset::choices().get(index.saturating_sub(1))
+    {
+        return Ok(*preset);
     }
 
     if let Some(preset) = Preset::from_str(choice) {

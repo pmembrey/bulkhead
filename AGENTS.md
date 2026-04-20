@@ -31,6 +31,7 @@ The main model to preserve:
   - user-facing docs in `README.md`
 
 ## Testing And Validation
+- The repo pins Rust 1.95.0 in `rust-toolchain.toml`; use that toolchain for local verification and CI.
 - Enable the repo hook in a clone with `git config core.hooksPath .githooks`.
 - Commits are expected to pass the repo-managed pre-commit hook at `.githooks/pre-commit`.
 - The canonical local and CI verification entrypoint is `./scripts/verify.sh`.

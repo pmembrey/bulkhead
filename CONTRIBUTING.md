@@ -2,6 +2,8 @@
 
 Contributions are welcome.
 
+This repo is pinned to Rust 1.95.0 via `rust-toolchain.toml`.
+
 Enable the repo-managed Git hooks in your clone:
 
 ```bash

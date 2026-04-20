@@ -74,22 +74,22 @@ pub(crate) fn ensure_devcontainer_cli(offer_install: bool) -> Result<()> {
         bail!("devcontainer is not installed");
     }
 
-    if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        if let Some(installer) =
+    if io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && let Some(installer) =
             choose_devcontainer_installer(command_exists("brew"), command_exists("npm"))
-        {
-            let prompt = format!(
-                "Install the Dev Container CLI now with `{}`?",
-                installer.command_string()
-            );
-            if confirm(&prompt)? {
-                install_devcontainer(false)?;
-                if command_exists("devcontainer") {
-                    return Ok(());
-                }
-
-                bail!("devcontainer install completed, but the binary is still not on PATH");
+    {
+        let prompt = format!(
+            "Install the Dev Container CLI now with `{}`?",
+            installer.command_string()
+        );
+        if confirm(&prompt)? {
+            install_devcontainer(false)?;
+            if command_exists("devcontainer") {
+                return Ok(());
             }
+
+            bail!("devcontainer install completed, but the binary is still not on PATH");
         }
     }
 
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(resolved, Some(command_path.clone()));
 
         fs::remove_file(&command_path).unwrap();
-        fs::remove_dir(&base.join("bin")).unwrap();
+        fs::remove_dir(base.join("bin")).unwrap();
         fs::remove_dir(base).unwrap();
     }
 }

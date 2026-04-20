@@ -255,15 +255,14 @@ pub(crate) fn destroy(workspace: Option<PathBuf>, force: bool) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(status) = resources.container_status.as_deref() {
-        if matches!(status, "running" | "restarting") {
-            if let Some(container_id) = resources.container_id.as_deref() {
-                run_command_allow_failure(
-                    "docker",
-                    &[OsString::from("stop"), OsString::from(container_id)],
-                )?;
-            }
-        }
+    if let Some(status) = resources.container_status.as_deref()
+        && matches!(status, "running" | "restarting")
+        && let Some(container_id) = resources.container_id.as_deref()
+    {
+        run_command_allow_failure(
+            "docker",
+            &[OsString::from("stop"), OsString::from(container_id)],
+        )?;
     }
 
     if let Some(container_id) = resources.container_id.as_deref() {

@@ -237,14 +237,14 @@ pub(crate) fn resolve_path_for_policy_checks(path: &Path) -> PathBuf {
         return canonical;
     }
 
-    if let Some(parent) = path.parent() {
-        if let Ok(canonical_parent) = fs::canonicalize(parent) {
-            if let Some(file_name) = path.file_name() {
-                return canonical_parent.join(file_name);
-            }
-
-            return canonical_parent;
+    if let Some(parent) = path.parent()
+        && let Ok(canonical_parent) = fs::canonicalize(parent)
+    {
+        if let Some(file_name) = path.file_name() {
+            return canonical_parent.join(file_name);
         }
+
+        return canonical_parent;
     }
 
     path.to_path_buf()

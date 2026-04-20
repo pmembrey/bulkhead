@@ -148,10 +148,10 @@ pub(crate) fn print_destroy_summary(resources: &Resources) {
         println!("  Container:  {container_id}");
     }
 
-    if let Some(status) = resources.container_status.as_deref() {
-        if matches!(status, "running" | "restarting") {
-            println!("              (currently running and will be force-stopped)");
-        }
+    if let Some(status) = resources.container_status.as_deref()
+        && matches!(status, "running" | "restarting")
+    {
+        println!("              (currently running and will be force-stopped)");
     }
 
     if !resources.volumes.is_empty() {

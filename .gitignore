@@ -1,6 +1,7 @@
 /target/
 /.devcontainer/
 /bulkhead.toml
+.bulkhead/
 .remember/
 .DS_Store
 *.swp

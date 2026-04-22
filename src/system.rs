@@ -175,8 +175,21 @@ pub(crate) fn print_buildx_permission_help(details: &str) {
 }
 
 pub(crate) fn run_command(program: &str, args: &[OsString]) -> Result<()> {
-    let status = new_command(program)
-        .args(args)
+    run_command_in_dir(program, args, None::<&Path>)
+}
+
+pub(crate) fn run_command_in_dir(
+    program: &str,
+    args: &[OsString],
+    directory: Option<&Path>,
+) -> Result<()> {
+    let mut command = new_command(program);
+    command.args(args);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+
+    let status = command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -203,8 +216,21 @@ pub(crate) fn run_command_allow_failure(program: &str, args: &[OsString]) -> Res
 }
 
 pub(crate) fn capture_stdout(program: &str, args: &[&str]) -> Result<String> {
-    let output = new_command(program)
-        .args(args)
+    capture_stdout_in_dir(program, args, None::<&Path>)
+}
+
+pub(crate) fn capture_stdout_in_dir(
+    program: &str,
+    args: &[&str],
+    directory: Option<&Path>,
+) -> Result<String> {
+    let mut command = new_command(program);
+    command.args(args);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+
+    let output = command
         .output()
         .with_context(|| format!("failed to run {}", render_command(program, args)))?;
 

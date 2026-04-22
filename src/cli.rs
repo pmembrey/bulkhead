@@ -3,6 +3,73 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+const CLONE_LONG_ABOUT: &str = "\
+Manage Bulkhead-owned isolated Git clones under `.bulkhead/clones/`.
+
+Use `bulkhead clone shell <name>` for the normal day-to-day flow:
+- jump back into an existing managed clone by name
+- or create it when missing and then open the Bulkhead shell there
+
+This mode keeps the source checkout and source repository metadata out of the
+container. If you want Git worktrees too, create them inside the isolated
+clone rather than against the original repository.";
+
+const CLONE_AFTER_LONG_HELP: &str = "\
+Examples:
+  bulkhead clone list
+  bulkhead clone shell feature-x
+  bulkhead clone shell feature-x --create
+  bulkhead clone shell feature-x --create --base origin/main";
+
+const CLONE_SHELL_LONG_ABOUT: &str = "\
+Open a Bulkhead shell in a Bulkhead-managed isolated clone.
+
+If the named clone already exists under `.bulkhead/clones/`, Bulkhead opens the
+normal shell flow there.
+
+If it does not exist:
+- interactive terminals prompt before creation
+- non-interactive runs require `--create`
+
+When Bulkhead creates a managed clone from this command, it:
+- creates an independent local clone with `git clone --no-local --no-hardlinks`
+- uses the clone name as the default branch name unless `--detach` is used
+- bootstraps Bulkhead files when safe
+- then opens the shell there";
+
+const CLONE_SHELL_AFTER_LONG_HELP: &str = "\
+Examples:
+  bulkhead clone shell feature-x
+  bulkhead clone shell feature-x --create
+  bulkhead clone shell feature-x --create --base origin/main
+  bulkhead clone shell review-fix --create --branch fix/review
+  bulkhead clone shell scratch --create --detach
+
+Tip:
+  Use `bulkhead clone list` first if you are not sure what managed clones
+  already exist for the current repository.";
+
+const CLONE_LIST_LONG_ABOUT: &str = "\
+List the Bulkhead-managed isolated clones for the current repository.
+
+Each clone lives under `.bulkhead/clones/` in the current repository root.";
+
+const CLONE_LIST_AFTER_LONG_HELP: &str = "\
+Examples:
+  bulkhead clone list
+  bulkhead clone shell feature-x";
+
+const CLONE_REMOVE_LONG_ABOUT: &str = "\
+Delete a Bulkhead-managed isolated clone.
+
+This removes only `.bulkhead/clones/<name>` for the current repository. It does
+not touch the source checkout or any other managed clones.";
+
+const CLONE_REMOVE_AFTER_LONG_HELP: &str = "\
+Examples:
+  bulkhead clone remove feature-x
+  bulkhead clone remove feature-x --force";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "bulkhead",
@@ -83,6 +150,13 @@ pub(crate) enum Commands {
         #[arg(long, action = ArgAction::SetTrue)]
         fix: bool,
     },
+    #[command(
+        subcommand,
+        about = "Manage Bulkhead-owned isolated Git clones",
+        long_about = CLONE_LONG_ABOUT,
+        after_long_help = CLONE_AFTER_LONG_HELP
+    )]
+    Clone(CloneCommands),
     #[command(subcommand)]
     Mount(MountCommands),
     #[command(subcommand)]
@@ -103,6 +177,65 @@ pub(crate) struct LogsArgs {
     pub(crate) follow: bool,
     #[arg(long, default_value_t = 100)]
     pub(crate) tail: usize,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CloneCommands {
+    #[command(
+        about = "Open a Bulkhead shell in a managed isolated clone",
+        long_about = CLONE_SHELL_LONG_ABOUT,
+        after_long_help = CLONE_SHELL_AFTER_LONG_HELP
+    )]
+    Shell {
+        /// Managed clone name under `.bulkhead/clones/`
+        name: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        /// Create the clone immediately if it does not exist
+        create: bool,
+        #[arg(long)]
+        /// Base commit or branch to check out after cloning
+        base: Option<String>,
+        #[arg(short = 'b', long)]
+        /// Branch name to create in the new clone
+        branch: Option<String>,
+        #[arg(short = 'd', long, action = ArgAction::SetTrue, conflicts_with = "branch")]
+        /// Leave the new clone in detached HEAD mode
+        detach: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        /// Allow creating a clone even when the source repository has uncommitted changes
+        allow_dirty_source: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        /// Skip installing Bulkhead files if the clone does not already have them
+        no_template: bool,
+        #[arg(long, value_enum)]
+        /// Bulkhead template preset to install when bootstrapping
+        preset: Option<Preset>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        /// Prompt for the Bulkhead template preset interactively
+        wizard: bool,
+        #[arg(short = 'y', long, action = ArgAction::SetTrue)]
+        /// Accept the default Bulkhead template preset without prompting
+        yes: bool,
+    },
+    #[command(
+        visible_alias = "ls",
+        about = "List Bulkhead-managed isolated clones",
+        long_about = CLONE_LIST_LONG_ABOUT,
+        after_long_help = CLONE_LIST_AFTER_LONG_HELP
+    )]
+    List,
+    #[command(
+        about = "Remove a Bulkhead-managed isolated clone",
+        long_about = CLONE_REMOVE_LONG_ABOUT,
+        after_long_help = CLONE_REMOVE_AFTER_LONG_HELP
+    )]
+    Remove {
+        /// Managed clone name under `.bulkhead/clones/`
+        name: String,
+        #[arg(short, long, action = ArgAction::SetTrue)]
+        /// Remove the clone without a confirmation prompt
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

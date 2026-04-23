@@ -272,6 +272,8 @@ This keeps the command ergonomic:
 
 - the clone name is the human handle
 - the branch name defaults to the same name
+- if the clone name is not a valid Git branch name, users should pass
+  `--branch <name>` or `--detach`
 
 Managed clone names are intentionally restricted to a simple on-disk subset:
 

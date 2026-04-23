@@ -9,6 +9,7 @@ use crate::system::{
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -73,7 +74,7 @@ fn shell(options: ShellCloneOptions) -> Result<()> {
     let clone_path = managed_clone_path(&source_repo_root, &options.name);
 
     if clone_path.exists() {
-        let workspace = existing_directory(Some(clone_path.clone()))?;
+        let workspace = existing_managed_clone_directory(&source_repo_root, &clone_path)?;
         ensure_git_repository(&workspace).with_context(|| {
             format!(
                 "managed clone `{}` is not a usable Git repository",
@@ -107,13 +108,14 @@ fn shell(options: ShellCloneOptions) -> Result<()> {
 
     prepare_clone_creation(&source_repo_root, options.allow_dirty_source)?;
     create_managed_clone(&source_repo_root, &clone_path, &options)?;
-    let workspace = existing_directory(Some(clone_path))?;
+    let workspace = existing_managed_clone_directory(&source_repo_root, &clone_path)?;
     workspace::shell(Some(workspace))
 }
 
 fn list() -> Result<()> {
     ensure_command("git")?;
     let source_repo_root = source_repo_root()?;
+    ensure_managed_clone_storage_is_not_symlinked(&source_repo_root)?;
     let clone_root = managed_clone_root(&source_repo_root);
 
     if !clone_root.is_dir() {
@@ -124,7 +126,7 @@ fn list() -> Result<()> {
     let mut entries = fs::read_dir(&clone_root)
         .with_context(|| format!("failed to read {}", clone_root.display()))?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.file_name());
 
@@ -166,6 +168,7 @@ fn remove(name: &str, force: bool) -> Result<()> {
     let clone_path = managed_clone_path(&source_repo_root, name);
 
     if !clone_path.exists() {
+        ensure_path_is_not_symlink(&clone_path, "managed clone")?;
         bail!(
             "no managed clone named `{}` exists under {}",
             name,
@@ -173,7 +176,7 @@ fn remove(name: &str, force: bool) -> Result<()> {
         );
     }
 
-    let clone_path = existing_directory(Some(clone_path))?;
+    let clone_path = existing_managed_clone_directory(&source_repo_root, &clone_path)?;
     if !force {
         let prompt = format!(
             "Delete managed clone `{}` at {}?",
@@ -201,6 +204,11 @@ fn create_managed_clone(
     clone_path: &Path,
     options: &ShellCloneOptions,
 ) -> Result<()> {
+    ensure_managed_clone_path_available(source_repo_root, clone_path)?;
+    if let Some(branch) = effective_branch(options) {
+        validate_git_branch_name(branch)?;
+    }
+
     if let Some(parent) = clone_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -208,11 +216,7 @@ fn create_managed_clone(
 
     run_command("git", &build_git_clone_args(source_repo_root, clone_path))?;
 
-    let branch = if options.detach {
-        None
-    } else {
-        options.branch.as_deref().or(Some(options.name.as_str()))
-    };
+    let branch = effective_branch(options);
     if let Some(args) = build_git_checkout_args(options.base.as_deref(), branch, options.detach) {
         run_command_in_dir("git", &args, Some(clone_path))?;
     }
@@ -312,6 +316,52 @@ fn managed_clone_path(source_repo_root: &Path, name: &str) -> PathBuf {
     managed_clone_root(source_repo_root).join(name)
 }
 
+fn existing_managed_clone_directory(source_repo_root: &Path, clone_path: &Path) -> Result<PathBuf> {
+    ensure_managed_clone_storage_is_not_symlinked(source_repo_root)?;
+    ensure_path_is_not_symlink(clone_path, "managed clone")?;
+    existing_directory(Some(clone_path.to_path_buf()))
+}
+
+fn ensure_managed_clone_path_available(source_repo_root: &Path, clone_path: &Path) -> Result<()> {
+    ensure_managed_clone_storage_is_not_symlinked(source_repo_root)?;
+
+    match fs::symlink_metadata(clone_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "managed clone must not be a symlink: {}",
+                clone_path.display()
+            )
+        }
+        Ok(_) => bail!(
+            "managed clone path already exists: {}",
+            clone_path.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect {}", clone_path.display()))
+        }
+    }
+}
+
+fn ensure_managed_clone_storage_is_not_symlinked(source_repo_root: &Path) -> Result<()> {
+    ensure_path_is_not_symlink(
+        &source_repo_root.join(BULKHEAD_DIR_NAME),
+        "Bulkhead state directory",
+    )?;
+    ensure_path_is_not_symlink(&managed_clone_root(source_repo_root), "managed clone root")
+}
+
+fn ensure_path_is_not_symlink(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("{description} must not be a symlink: {}", path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
 fn validate_clone_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("managed clone name must be between 1 and 255 characters");
@@ -350,6 +400,29 @@ fn validate_clone_name(name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn effective_branch(options: &ShellCloneOptions) -> Option<&str> {
+    if options.detach {
+        None
+    } else {
+        options.branch.as_deref().or(Some(options.name.as_str()))
+    }
+}
+
+fn validate_git_branch_name(branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["check-ref-format", "--branch", branch])
+        .output()
+        .with_context(|| format!("failed to validate Git branch name `{branch}`"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    bail!(
+        "`{branch}` is not a valid Git branch name. Use a different managed clone name, pass `--branch <name>`, or use `--detach`."
+    )
 }
 
 fn build_git_clone_args(source_repo_root: &Path, clone_path: &Path) -> Vec<OsString> {
@@ -428,10 +501,13 @@ fn render_command(program: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_git_checkout_args, build_git_clone_args, managed_clone_path, validate_clone_name,
+        build_git_checkout_args, build_git_clone_args, existing_managed_clone_directory,
+        managed_clone_path, validate_clone_name, validate_git_branch_name,
     };
     use std::ffi::OsString;
-    use std::path::Path;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn clone_args_force_independent_local_clone() {
@@ -489,6 +565,13 @@ mod tests {
     }
 
     #[test]
+    fn git_branch_validation_rejects_names_checkout_cannot_create() {
+        assert!(validate_git_branch_name("feature-x").is_ok());
+        assert!(validate_git_branch_name("-feature").is_err());
+        assert!(validate_git_branch_name("feature.").is_err());
+    }
+
+    #[test]
     fn clone_name_validation_rejects_unsafe_values() {
         assert!(validate_clone_name("feature-x").is_ok());
         assert!(validate_clone_name("feature_x.1").is_ok());
@@ -503,5 +586,36 @@ mod tests {
         assert!(validate_clone_name("../feature-x").is_err());
         assert!(validate_clone_name("feature/x").is_err());
         assert!(validate_clone_name("feature x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_clone_directory_rejects_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("bulkhead-clone-symlink");
+        let source_repo = root.join("source");
+        let clone_root = source_repo.join(".bulkhead").join("clones");
+        let external = root.join("external");
+        fs::create_dir_all(&clone_root).unwrap();
+        fs::create_dir_all(&external).unwrap();
+
+        let clone_path = clone_root.join("feature-x");
+        symlink(&external, &clone_path).unwrap();
+
+        let error = existing_managed_clone_directory(&source_repo, &clone_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("managed clone must not be a symlink"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
     }
 }

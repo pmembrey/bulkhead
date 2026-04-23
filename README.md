@@ -217,6 +217,9 @@ want a different branch name inside the clone, set it explicitly:
 bulkhead clone shell review-fix --create --branch fix/review
 ```
 
+The clone name is also the default Git branch name. If the on-disk clone name is
+not a valid Git branch name, pass `--branch <name>` or `--detach`.
+
 Because clone mode uses a normal independent Git clone, you can still create Git
 worktrees inside the clone later if you want them:
 

@@ -142,10 +142,12 @@ Useful options:
 - `--create`
   Create the clone immediately when missing.
 - `--base <rev>`
-  When creating, check out a specific base revision or branch after cloning.
+  When creating, use a specific revision or branch as the base after cloning.
+  Without this, use the exact commit that the source repository's `HEAD`
+  points to; do not infer the source branch's tracked branch name.
 - `--branch <name>`
-  Create or reset a specific branch name inside the new clone. This is useful
-  when the managed clone name and the Git branch name should differ.
+  Create or force-move a specific branch name inside the new clone. This is
+  useful when the managed clone name and the Git branch name should differ.
 - `--detach`
   When creating, leave the clone in detached HEAD mode.
 - `--allow-dirty-source`
@@ -249,8 +251,22 @@ Recommended default:
 
 - plain `bulkhead clone shell feature-x --create`
   - clone the repo
-  - if no `--base` is given, start from the source repo's current `HEAD`
-  - create or reset a branch named `feature-x` unless `--detach` is used
+  - if no `--base` is given, start from the exact commit that the source repo's
+    `HEAD` currently points to
+  - create or force-move a branch named `feature-x` to that base commit unless
+    `--detach` is used
+
+Here, "create or force-move" means the tool creates the branch if it is missing
+or moves the branch pointer to the chosen base commit, equivalent to
+`git branch -f feature-x <base>`, then checks out that branch. Bulkhead should
+not run a separate working-tree `git reset --hard` for this branch pointer
+update; requested checkout behavior still uses normal Git checkout semantics.
+
+When no `--base` is supplied, the base is the commit that the source
+repository's `HEAD` points to at clone creation time. If the source is in
+detached HEAD, use that detached commit hash. If the source `HEAD` is a branch,
+do not implicitly use its tracked branch name; users who want a named branch as
+the base should pass it explicitly, for example `--base origin/main`.
 
 This keeps the command ergonomic:
 
@@ -263,6 +279,13 @@ Managed clone names are intentionally restricted to a simple on-disk subset:
 - `-`
 - `_`
 - `.`
+- 1 to 255 characters total
+- not exactly `.` or `..`
+- no `..` substring
+- no leading `.`
+
+These rules keep names as direct children of `.bulkhead/clones/` and reject path
+traversal inputs such as `..` or `../../../etc` before they are used on disk.
 
 If users want a richer branch name such as `fix/review`, they should use a safe
 managed clone name on disk and pass `--branch fix/review`.

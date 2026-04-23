@@ -14,6 +14,7 @@ use std::process::Command;
 
 const BULKHEAD_DIR_NAME: &str = ".bulkhead";
 const CLONES_DIR_NAME: &str = "clones";
+const MAX_CLONE_NAME_LEN: usize = 255;
 
 pub(crate) fn clone(command: CloneCommands) -> Result<()> {
     match command {
@@ -312,8 +313,12 @@ fn managed_clone_path(source_repo_root: &Path, name: &str) -> PathBuf {
 }
 
 fn validate_clone_name(name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        bail!("managed clone name must not be empty");
+    if name.is_empty() {
+        bail!("managed clone name must be between 1 and 255 characters");
+    }
+
+    if name.len() > MAX_CLONE_NAME_LEN {
+        bail!("managed clone name must be between 1 and 255 characters");
     }
 
     if !name
@@ -321,6 +326,18 @@ fn validate_clone_name(name: &str) -> Result<()> {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
         bail!("managed clone names may only use ASCII letters, digits, `-`, `_`, and `.`");
+    }
+
+    if name == "." || name == ".." {
+        bail!("managed clone name must not be `.` or `..`");
+    }
+
+    if name.starts_with('.') {
+        bail!("managed clone names must not start with `.`");
+    }
+
+    if name.contains("..") {
+        bail!("managed clone names must not contain `..`");
     }
 
     let path = Path::new(name);
@@ -474,7 +491,15 @@ mod tests {
     #[test]
     fn clone_name_validation_rejects_unsafe_values() {
         assert!(validate_clone_name("feature-x").is_ok());
+        assert!(validate_clone_name("feature_x.1").is_ok());
+        assert!(validate_clone_name(&"a".repeat(255)).is_ok());
         assert!(validate_clone_name("").is_err());
+        assert!(validate_clone_name(&"a".repeat(256)).is_err());
+        assert!(validate_clone_name(".").is_err());
+        assert!(validate_clone_name("..").is_err());
+        assert!(validate_clone_name(".feature-x").is_err());
+        assert!(validate_clone_name("feature..x").is_err());
+        assert!(validate_clone_name("../../../etc").is_err());
         assert!(validate_clone_name("../feature-x").is_err());
         assert!(validate_clone_name("feature/x").is_err());
         assert!(validate_clone_name("feature x").is_err());

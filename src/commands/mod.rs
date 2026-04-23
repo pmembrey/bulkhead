@@ -1,3 +1,4 @@
+mod clone;
 mod doctor;
 mod git_config;
 mod mount;
@@ -24,6 +25,7 @@ pub(crate) fn dispatch(command: Commands) -> Result<()> {
         Commands::Exec { workspace, command } => workspace::exec(workspace.workspace, command),
         Commands::Destroy { workspace, force } => workspace::destroy(workspace.workspace, force),
         Commands::Doctor { fix } => doctor::doctor(fix),
+        Commands::Clone(command) => clone::clone(command),
         Commands::Mount(command) => mount::mount(command),
         Commands::Config(command) => match command {
             ConfigCommands::Git { command } => git_config::git_config(command),

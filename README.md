@@ -15,6 +15,11 @@ The basic model is simple:
 
 This is still under active development. The config format and CLI are not treated as stable yet.
 
+Current design notes:
+
+- [Clone mode spec](docs/clone-mode.md)
+- [Clone mode workflows](docs/examples/clone-mode-workflows.md)
+
 ## Why
 
 Local agent workflows are useful, but running them directly on the host with broad access is a bad default. `bulkhead` aims to make the safe path easy:
@@ -23,6 +28,17 @@ Local agent workflows are useful, but running them directly on the host with bro
 - keep host exposure narrow by default
 - manage extra mounts explicitly
 - make common lifecycle operations simple from one CLI
+
+The current default remains the simplest flow:
+
+```bash
+bulkhead shell
+```
+
+Git-aware isolation support:
+
+- clone mode for stronger isolation under `.bulkhead/clones/`
+- Git worktrees inside those isolated clones when you want lighter-weight parallel checkouts
 
 ## Quick Start
 
@@ -50,6 +66,13 @@ Create a workspace:
 mkdir my-project
 cd my-project
 bulkhead shell
+```
+
+Create and enter an isolated clone from an existing repository:
+
+```bash
+cd my-repo
+bulkhead clone shell feature-x --create
 ```
 
 If `bulkhead.toml` does not exist yet, `bulkhead` will offer to create it and let you choose a preset. If the Dev Container CLI is missing, use:
@@ -84,6 +107,16 @@ Other useful commands:
   Follow recent container logs live.
 - `bulkhead exec -- pwd`
   Run a one-off command inside the container without opening an interactive shell.
+- `bulkhead clone shell feature-x`
+  Re-enter an existing Bulkhead-managed isolated clone by name.
+- `bulkhead clone shell feature-x --create`
+  Create `.bulkhead/clones/feature-x`, bootstrap Bulkhead there when safe, and open a shell inside it.
+- `bulkhead clone shell review-fix --create --branch fix/review`
+  Use a simple managed clone name on disk but create a different branch inside the clone.
+- `bulkhead clone list`
+  Show the managed isolated clones for the current repository.
+- `bulkhead clone remove feature-x`
+  Delete one managed clone without touching the source checkout.
 - `bulkhead mount list`
   Show the extra host path mounts currently configured in `bulkhead.toml`.
 - `bulkhead mount add ~/drop /drop --rw`
@@ -142,6 +175,60 @@ A few important points:
 - extra host paths live under `[[path]]`
 - `access` defaults to read-only unless you explicitly request write access
 
+## Isolated Clones
+
+Clone mode is the recommended Git-aware isolation workflow:
+
+```bash
+bulkhead clone shell feature-x --create
+```
+
+That command:
+
+- creates an independent local clone under `.bulkhead/clones/feature-x` when it does not exist yet
+- bootstraps Bulkhead there when safe
+- starts the normal Bulkhead shell flow inside that clone
+- keeps the source checkout and source repository metadata out of the container
+- warns if the source repository is dirty, since clone mode starts from committed Git state only
+
+Useful workflows:
+
+```bash
+# Re-enter an existing managed clone
+bulkhead clone shell feature-x
+
+# Create a fresh isolated clone and branch from origin/main
+bulkhead clone shell feature-x --create --base origin/main
+
+# Create a detached scratch clone
+bulkhead clone shell scratch --create --detach
+
+# See what managed clones already exist
+bulkhead clone list
+
+# Remove one managed clone
+bulkhead clone remove feature-x
+```
+
+Managed clone names are simple directory names under `.bulkhead/clones/`. If you
+want a different branch name inside the clone, set it explicitly:
+
+```bash
+bulkhead clone shell review-fix --create --branch fix/review
+```
+
+The clone name is also the default Git branch name. If the on-disk clone name is
+not a valid Git branch name, pass `--branch <name>` or `--detach`.
+
+Because clone mode uses a normal independent Git clone, you can still create Git
+worktrees inside the clone later if you want them:
+
+```bash
+bulkhead clone shell feature-x --create
+# inside the clone:
+git worktree add ../feature-x-scratch
+```
+
 ## Safety Model
 
 `bulkhead` is trying to give you a practical host-protection boundary, not perfect sandboxing.
@@ -160,6 +247,10 @@ Still true:
 - code inside the container can fully modify the repo you launched from
 - network access is not blocked by default
 - adding broad writable host mounts weakens the model
+
+Clone mode changes that tradeoff for Git-based workflows by moving the
+container into a Bulkhead-managed isolated clone under `.bulkhead/clones/`.
+That design is documented in [docs/clone-mode.md](docs/clone-mode.md).
 
 ## Diagnostics
 

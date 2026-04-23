@@ -303,7 +303,11 @@ pub(crate) fn destroy(workspace: Option<PathBuf>, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn select_template_preset(preset: Option<Preset>, wizard: bool, yes: bool) -> Result<Preset> {
+pub(crate) fn select_template_preset(
+    preset: Option<Preset>,
+    wizard: bool,
+    yes: bool,
+) -> Result<Preset> {
     if let Some(preset) = preset {
         return Ok(preset);
     }
@@ -319,7 +323,11 @@ fn select_template_preset(preset: Option<Preset>, wizard: bool, yes: bool) -> Re
     Ok(Preset::Agent)
 }
 
-fn write_workspace_template(workspace: &Path, preset: Preset, force: bool) -> Result<()> {
+pub(crate) fn write_workspace_template(
+    workspace: &Path,
+    preset: Preset,
+    force: bool,
+) -> Result<()> {
     let devcontainer_dir = workspace.join(".devcontainer");
     let bulkhead_toml_path = config_path(workspace);
     let dockerfile_path = devcontainer_dir.join("Dockerfile");
@@ -355,6 +363,43 @@ fn write_workspace_template(workspace: &Path, preset: Preset, force: bool) -> Re
         .with_context(|| format!("failed to write {}", post_create_script_path.display()))?;
 
     render_workspace_devcontainer(workspace)
+}
+
+pub(crate) fn bootstrap_workspace_template_if_missing(
+    workspace: &Path,
+    preset: Preset,
+) -> Result<()> {
+    let config = config_path(workspace);
+    let devcontainer_dir = workspace.join(".devcontainer");
+
+    if config.is_file() {
+        println!(
+            "Bulkhead config already exists in {}; leaving it unchanged.",
+            workspace.display()
+        );
+        return Ok(());
+    }
+
+    if devcontainer_dir.exists() {
+        println!(
+            "Skipped Bulkhead template installation in {} because {} already exists.",
+            workspace.display(),
+            devcontainer_dir.display()
+        );
+        println!(
+            "Run `bulkhead template {}` if you want Bulkhead to manage files there.",
+            workspace.display()
+        );
+        return Ok(());
+    }
+
+    write_workspace_template(workspace, preset, false)?;
+    println!(
+        "Bulkhead template installed in {} using the `{}` preset.",
+        workspace.display(),
+        preset.as_str()
+    );
+    Ok(())
 }
 
 fn start_workspace(workspace: &Path, rebuild: bool) -> Result<()> {

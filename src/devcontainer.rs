@@ -537,7 +537,7 @@ fn validate_run_args(run_args: &[String]) -> Result<()> {
         if matches_flag(arg, "--mount")
             || matches_flag(arg, "--volume")
             || matches_flag(arg, "--volumes-from")
-            || matches_short_flag(arg, "-v")
+            || is_volume_short_flag(arg)
         {
             bail!("host mounts must be declared in bulkhead.toml, not run_args");
         }
@@ -572,8 +572,14 @@ fn matches_flag(arg: &str, flag: &str) -> bool {
     arg == flag || arg.starts_with(&format!("{flag}="))
 }
 
-fn matches_short_flag(arg: &str, flag: &str) -> bool {
-    arg == flag || arg.starts_with(flag)
+fn is_volume_short_flag(arg: &str) -> bool {
+    if arg == "-v" {
+        return true;
+    }
+
+    arg.strip_prefix("-v")
+        .and_then(|value| value.chars().next())
+        .is_some_and(|ch| !ch.is_ascii_alphabetic())
 }
 
 fn flag_value_is(args: &[String], index: usize, flag: &str, expected: &str) -> bool {
@@ -737,6 +743,7 @@ run_args = ["--cap-add=SYS_ADMIN"]
             r#"run_args = ["--network=host"]"#,
             r#"run_args = ["--mount", "type=bind,source=/var/run/docker.sock,target=/sock"]"#,
             r#"run_args = ["-v", "/var/run/docker.sock:/sock"]"#,
+            r#"run_args = ["-v/var/run/docker.sock:/sock"]"#,
             r#"run_args = ["--device=/dev/kvm"]"#,
         ] {
             let config = load_inline_config(raw).unwrap();
@@ -745,6 +752,18 @@ run_args = ["--cap-add=SYS_ADMIN"]
                 "{raw} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn run_args_do_not_treat_verbose_as_volume_mount() {
+        let config = load_inline_config(
+            r#"
+run_args = ["-verbose"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_ok());
     }
 
     #[test]

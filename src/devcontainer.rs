@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 const DEVCONTAINER_SCHEMA: &str =
     "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json";
@@ -210,15 +210,7 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
         bail!("build.context must stay within the workspace");
     }
 
-    if config
-        .run_args
-        .iter()
-        .any(|arg| arg.to_ascii_uppercase().contains("SYS_ADMIN"))
-    {
-        bail!(
-            "SYS_ADMIN capability detected in run_args; this defeats the read-only .devcontainer mount"
-        );
-    }
+    validate_run_args(&config.run_args)?;
 
     let mut targets = BTreeSet::new();
     targets.insert(reserved_devcontainer_target.clone());
@@ -256,6 +248,8 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
             bail!("volume names must not be empty");
         }
 
+        let target = normalize_container_path(&volume.target)?;
+
         let sanitized_name = sanitize_volume_name(&volume.name);
         if sanitized_name.is_empty() {
             bail!(
@@ -268,38 +262,40 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
             bail!("duplicate volume name {}", volume.name);
         }
 
-        if !targets.insert(volume.target.clone()) {
-            bail!("duplicate mount target {}", volume.target);
+        if !targets.insert(target.clone()) {
+            bail!("duplicate mount target {}", target);
         }
 
-        ensure_absolute_container_path(&volume.target)?;
+        ensure_not_reserved_container_target(
+            &target,
+            &reserved_devcontainer_target,
+            &reserved_bulkhead_config_target,
+        )?;
     }
 
     for path in &config.path {
-        if !targets.insert(path.target.clone()) {
-            bail!("duplicate mount target {}", path.target);
+        let target = normalize_container_path(&path.target)?;
+
+        if !targets.insert(target.clone()) {
+            bail!("duplicate mount target {}", target);
         }
 
-        ensure_absolute_container_path(&path.target)?;
-
-        if path.target == reserved_devcontainer_target {
-            bail!(
-                "{reserved_devcontainer_target} is reserved for Bulkhead's read-only config mount"
-            );
-        }
-
-        if path.target == reserved_bulkhead_config_target {
-            bail!(
-                "{reserved_bulkhead_config_target} is reserved for Bulkhead's read-only config mount"
-            );
-        }
+        ensure_not_reserved_container_target(
+            &target,
+            &reserved_devcontainer_target,
+            &reserved_bulkhead_config_target,
+        )?;
 
         let source = resolve_mount_source(workspace, &path.source)?;
         let source_lower = source.to_ascii_lowercase();
-        let target_lower = path.target.to_ascii_lowercase();
+        let target_lower = target.to_ascii_lowercase();
 
         if source_lower.contains("docker.sock") || target_lower.contains("docker.sock") {
             bail!("mounting the Docker socket is not allowed");
+        }
+
+        if path.access == MountAccess::Rw && path.source.contains("${") {
+            bail!("writable mounts may not use variable-based host sources");
         }
 
         if let Some(resolved_home) = resolve_plain_host_path(workspace, &path.source, &home_dir) {
@@ -421,10 +417,11 @@ fn build_mounts(
     let mut mounts = Vec::new();
 
     for volume in &config.volume {
+        let target = normalize_container_path(&volume.target)?;
         mounts.push(format!(
             "source=bulkhead-${{localWorkspaceFolderBasename}}-{}-${{devcontainerId}},target={},type=volume",
             sanitize_volume_name(&volume.name),
-            volume.target
+            target
         ));
     }
 
@@ -446,7 +443,8 @@ fn build_mounts(
 
     for path in &config.path {
         let source = resolve_mount_source(workspace, &path.source)?;
-        let mut mount = format!("source={source},target={},type=bind", path.target);
+        let target = normalize_container_path(&path.target)?;
+        let mut mount = format!("source={source},target={target},type=bind");
         if path.access == MountAccess::Ro {
             mount.push_str(",readonly");
         }
@@ -522,24 +520,122 @@ fn remote_user_home(remote_user: &str) -> String {
     }
 }
 
+fn validate_run_args(run_args: &[String]) -> Result<()> {
+    for (index, arg) in run_args.iter().enumerate() {
+        let uppercase = arg.to_ascii_uppercase();
+
+        if arg == "--privileged" || arg.starts_with("--privileged=") {
+            bail!("run_args may not enable privileged containers");
+        }
+
+        if uppercase.contains("SYS_ADMIN") {
+            bail!(
+                "SYS_ADMIN capability detected in run_args; this defeats the read-only .devcontainer mount"
+            );
+        }
+
+        if matches_flag(arg, "--mount")
+            || matches_flag(arg, "--volume")
+            || matches_flag(arg, "--volumes-from")
+            || matches_short_flag(arg, "-v")
+        {
+            bail!("host mounts must be declared in bulkhead.toml, not run_args");
+        }
+
+        if matches_flag(arg, "--device") || matches_flag(arg, "--device-cgroup-rule") {
+            bail!("device access must not be configured through run_args");
+        }
+
+        if flag_value_is(run_args, index, "--cap-add", "ALL") {
+            bail!("run_args may not add all Linux capabilities");
+        }
+
+        for flag in [
+            "--pid",
+            "--network",
+            "--net",
+            "--ipc",
+            "--uts",
+            "--userns",
+            "--cgroupns",
+        ] {
+            if flag_value_is(run_args, index, flag, "host") {
+                bail!("run_args may not join host namespaces");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn matches_flag(arg: &str, flag: &str) -> bool {
+    arg == flag || arg.starts_with(&format!("{flag}="))
+}
+
+fn matches_short_flag(arg: &str, flag: &str) -> bool {
+    arg == flag || arg.starts_with(flag)
+}
+
+fn flag_value_is(args: &[String], index: usize, flag: &str, expected: &str) -> bool {
+    let arg = &args[index];
+    let expected = expected.to_ascii_lowercase();
+
+    if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+        return value.eq_ignore_ascii_case(&expected);
+    }
+
+    arg == flag
+        && args
+            .get(index + 1)
+            .is_some_and(|value| value.eq_ignore_ascii_case(&expected))
+}
+
 pub(crate) fn normalize_container_path(path: &str) -> Result<String> {
     if !path.starts_with('/') {
         bail!("container paths must be absolute: {path}");
     }
 
-    if path == "/" {
-        return Ok("/".to_owned());
+    let mut segments = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(segment) => segments.push(segment.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                if segments.pop().is_none() {
+                    bail!("container paths must not escape root: {path}");
+                }
+            }
+            Component::Prefix(_) => bail!("container paths must be Unix-style absolute paths"),
+        }
     }
 
-    Ok(path.trim_end_matches('/').to_owned())
+    if segments.is_empty() {
+        Ok("/".to_owned())
+    } else {
+        Ok(format!("/{}", segments.join("/")))
+    }
 }
 
-fn ensure_absolute_container_path(path: &str) -> Result<()> {
-    if !path.starts_with('/') {
-        bail!("container paths must be absolute: {path}");
+fn ensure_not_reserved_container_target(
+    target: &str,
+    reserved_devcontainer_target: &str,
+    reserved_bulkhead_config_target: &str,
+) -> Result<()> {
+    if is_container_path_at_or_under(target, reserved_devcontainer_target) {
+        bail!("{reserved_devcontainer_target} is reserved for Bulkhead's read-only config mount");
+    }
+
+    if is_container_path_at_or_under(target, reserved_bulkhead_config_target) {
+        bail!(
+            "{reserved_bulkhead_config_target} is reserved for Bulkhead's read-only config mount"
+        );
     }
 
     Ok(())
+}
+
+fn is_container_path_at_or_under(path: &str, base: &str) -> bool {
+    path == base || (base != "/" && path.starts_with(&format!("{base}/")))
 }
 
 fn join_container_path(base: &str, segment: &str) -> String {
@@ -634,6 +730,24 @@ run_args = ["--cap-add=SYS_ADMIN"]
     }
 
     #[test]
+    fn rejects_privileged_and_host_mount_run_args() {
+        for raw in [
+            r#"run_args = ["--privileged"]"#,
+            r#"run_args = ["--cap-add=ALL"]"#,
+            r#"run_args = ["--network=host"]"#,
+            r#"run_args = ["--mount", "type=bind,source=/var/run/docker.sock,target=/sock"]"#,
+            r#"run_args = ["-v", "/var/run/docker.sock:/sock"]"#,
+            r#"run_args = ["--device=/dev/kvm"]"#,
+        ] {
+            let config = load_inline_config(raw).unwrap();
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{raw} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_docker_socket_mount() {
         let config = load_inline_config(
             r#"
@@ -648,9 +762,49 @@ target = "/var/run/docker.sock"
     }
 
     #[test]
+    fn rejects_reserved_mount_target_variants_and_descendants() {
+        for target in [
+            "/workspace/.devcontainer/",
+            "/workspace/./.devcontainer",
+            "/workspace/.devcontainer/devcontainer.json",
+            "/workspace/bulkhead.toml",
+            "/workspace/bulkhead.toml/child",
+        ] {
+            let config = load_inline_config(&format!(
+                r#"
+[[path]]
+source = "drop"
+target = "{target}"
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{target} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_writable_variable_mount_sources() {
+        let config = load_inline_config(
+            r#"
+[[path]]
+source = "${localEnv:HOME}"
+target = "/host-home"
+access = "rw"
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
     fn workspace_folder_is_normalized() {
         assert_eq!(
-            normalize_container_path("/workspace/").unwrap(),
+            normalize_container_path("/workspace/./repo/..").unwrap(),
             "/workspace"
         );
     }

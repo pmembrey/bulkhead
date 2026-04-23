@@ -4,14 +4,14 @@ use crate::cli::CloneCommands;
 use crate::config::{Preset, existing_directory};
 use crate::prompt::{confirm, is_interactive_terminal};
 use crate::system::{
-    capture_stdout, capture_stdout_in_dir, ensure_command, run_command, run_command_in_dir,
+    capture_stdout, capture_stdout_in_dir, command_output_in_dir, ensure_command, run_command,
+    run_command_in_dir,
 };
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 const BULKHEAD_DIR_NAME: &str = ".bulkhead";
 const CLONES_DIR_NAME: &str = "clones";
@@ -411,9 +411,7 @@ fn effective_branch(options: &ShellCloneOptions) -> Option<&str> {
 }
 
 fn validate_git_branch_name(branch: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["check-ref-format", "--branch", branch])
-        .output()
+    let output = command_output_in_dir("git", &["check-ref-format", "--branch", branch], None)
         .with_context(|| format!("failed to validate Git branch name `{branch}`"))?;
 
     if output.status.success() {
@@ -464,11 +462,7 @@ fn build_git_checkout_args(
 }
 
 fn command_stdout_in_dir(program: &str, args: &[&str], directory: &Path) -> Result<Option<String>> {
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(directory)
-        .output()
-        .with_context(|| format!("failed to run {}", render_command(program, args)))?;
+    let output = command_output_in_dir(program, args, Some(directory))?;
 
     if output.status.success() {
         return Ok(Some(

@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum DevcontainerInstaller {
@@ -224,15 +224,7 @@ pub(crate) fn capture_stdout_in_dir(
     args: &[&str],
     directory: Option<&Path>,
 ) -> Result<String> {
-    let mut command = new_command(program);
-    command.args(args);
-    if let Some(directory) = directory {
-        command.current_dir(directory);
-    }
-
-    let output = command
-        .output()
-        .with_context(|| format!("failed to run {}", render_command(program, args)))?;
+    let output = command_output_in_dir(program, args, directory)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -248,6 +240,22 @@ pub(crate) fn capture_stdout_in_dir(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+pub(crate) fn command_output_in_dir(
+    program: &str,
+    args: &[&str],
+    directory: Option<&Path>,
+) -> Result<Output> {
+    let mut command = new_command(program);
+    command.args(args);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+
+    command
+        .output()
+        .with_context(|| format!("failed to run {}", render_command(program, args)))
 }
 
 fn render_command<I, S>(program: &str, args: I) -> String

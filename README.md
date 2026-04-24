@@ -141,7 +141,7 @@ Example:
 ```toml
 name = "Bulkhead Agent Sandbox"
 workspace_folder = "/workspace"
-remote_user = "miggyx"
+remote_user = "developer"
 agents = ["claude", "codex", "pi"]
 
 [build]

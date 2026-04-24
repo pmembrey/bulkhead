@@ -185,12 +185,16 @@ pub(crate) fn ensure_path_mounts_array(document: &mut DocumentMut) -> Result<&mu
         .context("`path` must be declared as [[path]] entries")
 }
 
-pub(crate) fn gitconfig_target(remote_user: &str) -> String {
+pub(crate) fn remote_user_home(remote_user: &str) -> String {
     if remote_user == "root" {
-        "/root/.gitconfig".to_owned()
+        "/root".to_owned()
     } else {
-        format!("/home/{remote_user}/.gitconfig")
+        format!("/home/{remote_user}")
     }
+}
+
+pub(crate) fn gitconfig_target(remote_user: &str) -> String {
+    format!("{}/.gitconfig", remote_user_home(remote_user))
 }
 
 pub(crate) fn resolve_mount_source(workspace: &Path, source: &str) -> Result<String> {
@@ -448,12 +452,7 @@ impl PreinstalledAgent {
     }
 
     pub(crate) fn config_target(self, remote_user: &str) -> String {
-        let home = if remote_user == "root" {
-            "/root".to_owned()
-        } else {
-            format!("/home/{remote_user}")
-        };
-
+        let home = remote_user_home(remote_user);
         match self {
             PreinstalledAgent::Claude => format!("{home}/.claude"),
             PreinstalledAgent::Codex => format!("{home}/.codex"),
@@ -524,7 +523,8 @@ fn default_container_env() -> BTreeMap<String, String> {
 mod tests {
     use super::{
         AGENT_PRESET_TOML, AUDIT_PRESET_TOML, BulkheadConfig, MINIMAL_PRESET_TOML, MountAccess,
-        PreinstalledAgent, Preset, instantiate_template, load_inline_config, resolve_mount_access,
+        PreinstalledAgent, Preset, instantiate_template, is_docker_socket_path, load_inline_config,
+        resolve_mount_access, resolve_workspace_config_path, sanitize_volume_name,
         upsert_path_mount_in_document,
     };
     use crate::devcontainer::validate_config;
@@ -625,5 +625,108 @@ agents = ["claude", "codex", "pi"]
                 PreinstalledAgent::Pi
             ]
         );
+    }
+
+    #[test]
+    fn workspace_config_path_rejects_empty() {
+        let workspace = Path::new("/workspace");
+        assert!(resolve_workspace_config_path(workspace, "").is_err());
+        assert!(resolve_workspace_config_path(workspace, "   ").is_err());
+    }
+
+    #[test]
+    fn workspace_config_path_rejects_absolute() {
+        let workspace = Path::new("/workspace");
+        assert!(resolve_workspace_config_path(workspace, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn workspace_config_path_rejects_home_expansion() {
+        let workspace = Path::new("/workspace");
+        assert!(resolve_workspace_config_path(workspace, "~").is_err());
+        assert!(resolve_workspace_config_path(workspace, "~/file").is_err());
+    }
+
+    #[test]
+    fn workspace_config_path_rejects_variable_expansion() {
+        let workspace = Path::new("/workspace");
+        assert!(resolve_workspace_config_path(workspace, "${HOME}/file").is_err());
+    }
+
+    #[test]
+    fn workspace_config_path_rejects_traversal_escape() {
+        let workspace = Path::new("/workspace");
+        assert!(resolve_workspace_config_path(workspace, "../etc/passwd").is_err());
+        assert!(resolve_workspace_config_path(workspace, "subdir/../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn workspace_config_path_allows_valid_relative_paths() {
+        let workspace = Path::new("/workspace");
+        assert_eq!(
+            resolve_workspace_config_path(workspace, ".devcontainer/Dockerfile").unwrap(),
+            Path::new("/workspace/.devcontainer/Dockerfile")
+        );
+        assert_eq!(
+            resolve_workspace_config_path(workspace, "sub/dir/file").unwrap(),
+            Path::new("/workspace/sub/dir/file")
+        );
+    }
+
+    #[test]
+    fn workspace_config_path_normalizes_current_dir() {
+        let workspace = Path::new("/workspace");
+        assert_eq!(
+            resolve_workspace_config_path(workspace, "./Dockerfile").unwrap(),
+            Path::new("/workspace/Dockerfile")
+        );
+    }
+
+    #[test]
+    fn workspace_config_path_allows_non_escaping_parent_dir() {
+        let workspace = Path::new("/workspace");
+        assert_eq!(
+            resolve_workspace_config_path(workspace, "a/b/../c").unwrap(),
+            Path::new("/workspace/a/c")
+        );
+    }
+
+    #[test]
+    fn sanitize_volume_name_preserves_valid_names() {
+        assert_eq!(sanitize_volume_name("history"), "history");
+        assert_eq!(sanitize_volume_name("my-volume"), "my-volume");
+        assert_eq!(sanitize_volume_name("vol_1.data"), "vol_1.data");
+    }
+
+    #[test]
+    fn sanitize_volume_name_replaces_special_chars() {
+        assert_eq!(sanitize_volume_name("my volume"), "my-volume");
+        assert_eq!(sanitize_volume_name("a@b#c"), "a-b-c");
+    }
+
+    #[test]
+    fn sanitize_volume_name_trims_leading_trailing_dashes() {
+        assert_eq!(sanitize_volume_name("-leading"), "leading");
+        assert_eq!(sanitize_volume_name("trailing-"), "trailing");
+        assert_eq!(sanitize_volume_name("-both-"), "both");
+    }
+
+    #[test]
+    fn sanitize_volume_name_returns_empty_for_all_special_chars() {
+        assert_eq!(sanitize_volume_name("@#$"), "");
+        assert_eq!(sanitize_volume_name("---"), "");
+    }
+
+    #[test]
+    fn docker_socket_path_detects_standard_locations() {
+        assert!(is_docker_socket_path(Path::new("/var/run/docker.sock")));
+        assert!(is_docker_socket_path(Path::new("/run/docker.sock")));
+    }
+
+    #[test]
+    fn docker_socket_path_rejects_non_socket_paths() {
+        assert!(!is_docker_socket_path(Path::new("/tmp/something")));
+        assert!(!is_docker_socket_path(Path::new("/var/run/other.sock")));
+        assert!(!is_docker_socket_path(Path::new("/home/user/docker.sock")));
     }
 }

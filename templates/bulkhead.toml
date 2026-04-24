@@ -34,8 +34,9 @@ target = "/commandhistory"
 # Bulkhead always mounts the current directory read-write at `/workspace`, so the
 # code you run in the container can fully modify the repo you launched from.
 # Add more host paths only when you want them. `source` may be absolute,
-# relative to the workspace root, or use `~/...`. `access` defaults to "ro" if
-# omitted.
+# relative to the workspace root, use `~/...`, or use devcontainer variables for
+# read-only mounts. Writable mounts must use plain host paths. `access` defaults
+# to "ro" if omitted.
 # The managed `[git]` block above mounts your host `~/.gitconfig` read-only at
 # the remote user's home directory.
 # Set `agents = ["claude", "codex", "pi"]` to preinstall supported agent CLIs and
@@ -50,4 +51,5 @@ target = "/commandhistory"
 # access = "rw"
 #
 # Bulkhead always adds read-only mounts for `.devcontainer` and `bulkhead.toml`
-# automatically, so you do not need to declare them here.
+# automatically, so you do not need to declare them here and extra mounts cannot
+# target those paths or their descendants.

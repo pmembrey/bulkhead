@@ -38,3 +38,5 @@ target = "/commandhistory"
 # - useful when you want the smallest host footprint
 # - `[build]` can be redirected to another Dockerfile and build context in the repo
 # - Bulkhead still adds read-only mounts for `.devcontainer` and `bulkhead.toml`
+# - extra mounts cannot target those managed config paths or their descendants
+# - writable extra mounts must use plain host paths, not devcontainer variables

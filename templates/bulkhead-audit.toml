@@ -40,6 +40,8 @@ target = "/commandhistory"
 # - the bundled Dockerfile is Rust-oriented by default, but `[build]` can point
 #   at another Dockerfile and build context in the repo
 # - Bulkhead still adds read-only mounts for `.devcontainer` and `bulkhead.toml`
+# - extra mounts cannot target those managed config paths or their descendants
+# - writable extra mounts must use plain host paths, not devcontainer variables
 #
 # [[path]]
 # source = "~/drop"

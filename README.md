@@ -174,6 +174,9 @@ A few important points:
 - `[git]` is a dedicated managed feature for mounting host `~/.gitconfig` read-only into the container user's home
 - extra host paths live under `[[path]]`
 - `access` defaults to read-only unless you explicitly request write access
+- writable `[[path]]` mounts must resolve to plain host paths; variable-based sources such as `${localEnv:...}` are allowed only for read-only mounts
+- mount targets are normalized and may not point at or under Bulkhead's read-only `/workspace/.devcontainer` or `/workspace/bulkhead.toml` mounts
+- `run_args` is allowed for narrow Docker options, but Bulkhead rejects flags that would bypass its host-access policy, including privileged mode, host bind mounts, devices, host namespaces, `SYS_ADMIN`, and `--cap-add=ALL`
 
 ## Isolated Clones
 
@@ -239,7 +242,7 @@ Defaults:
 - `.devcontainer` mounted read-only
 - `bulkhead.toml` mounted read-only
 - no Docker socket mount
-- `SYS_ADMIN` capability rejected
+- dangerous Docker runtime flags rejected, including privileged mode, host bind mounts, devices, host namespaces, `SYS_ADMIN`, and `--cap-add=ALL`
 - minimal host mounts unless explicitly configured
 
 Still true:

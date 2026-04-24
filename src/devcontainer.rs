@@ -1,15 +1,15 @@
 use crate::config::{
     BulkheadConfig, MountAccess, PreinstalledAgent, config_path, devcontainer_relative_path,
-    gitconfig_target, home_dir, is_docker_socket_path, load_bulkhead_config, resolve_mount_source,
-    resolve_path_for_policy_checks, resolve_plain_host_path, resolve_workspace_config_path,
-    sanitize_volume_name,
+    gitconfig_target, home_dir, is_docker_socket_path, load_bulkhead_config, remote_user_home,
+    resolve_mount_source, resolve_path_for_policy_checks, resolve_plain_host_path,
+    resolve_workspace_config_path, sanitize_volume_name,
 };
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 const DEVCONTAINER_SCHEMA: &str =
     "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json";
@@ -210,15 +210,7 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
         bail!("build.context must stay within the workspace");
     }
 
-    if config
-        .run_args
-        .iter()
-        .any(|arg| arg.to_ascii_uppercase().contains("SYS_ADMIN"))
-    {
-        bail!(
-            "SYS_ADMIN capability detected in run_args; this defeats the read-only .devcontainer mount"
-        );
-    }
+    validate_run_args(&config.run_args)?;
 
     let mut targets = BTreeSet::new();
     targets.insert(reserved_devcontainer_target.clone());
@@ -256,6 +248,8 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
             bail!("volume names must not be empty");
         }
 
+        let target = normalize_container_path(&volume.target)?;
+
         let sanitized_name = sanitize_volume_name(&volume.name);
         if sanitized_name.is_empty() {
             bail!(
@@ -268,38 +262,40 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
             bail!("duplicate volume name {}", volume.name);
         }
 
-        if !targets.insert(volume.target.clone()) {
-            bail!("duplicate mount target {}", volume.target);
+        if !targets.insert(target.clone()) {
+            bail!("duplicate mount target {}", target);
         }
 
-        ensure_absolute_container_path(&volume.target)?;
+        ensure_not_reserved_container_target(
+            &target,
+            &reserved_devcontainer_target,
+            &reserved_bulkhead_config_target,
+        )?;
     }
 
     for path in &config.path {
-        if !targets.insert(path.target.clone()) {
-            bail!("duplicate mount target {}", path.target);
+        let target = normalize_container_path(&path.target)?;
+
+        if !targets.insert(target.clone()) {
+            bail!("duplicate mount target {}", target);
         }
 
-        ensure_absolute_container_path(&path.target)?;
-
-        if path.target == reserved_devcontainer_target {
-            bail!(
-                "{reserved_devcontainer_target} is reserved for Bulkhead's read-only config mount"
-            );
-        }
-
-        if path.target == reserved_bulkhead_config_target {
-            bail!(
-                "{reserved_bulkhead_config_target} is reserved for Bulkhead's read-only config mount"
-            );
-        }
+        ensure_not_reserved_container_target(
+            &target,
+            &reserved_devcontainer_target,
+            &reserved_bulkhead_config_target,
+        )?;
 
         let source = resolve_mount_source(workspace, &path.source)?;
         let source_lower = source.to_ascii_lowercase();
-        let target_lower = path.target.to_ascii_lowercase();
+        let target_lower = target.to_ascii_lowercase();
 
         if source_lower.contains("docker.sock") || target_lower.contains("docker.sock") {
             bail!("mounting the Docker socket is not allowed");
+        }
+
+        if path.access == MountAccess::Rw && path.source.contains("${") {
+            bail!("writable mounts may not use variable-based host sources");
         }
 
         if let Some(resolved_home) = resolve_plain_host_path(workspace, &path.source, &home_dir) {
@@ -360,8 +356,7 @@ fn build_container_env(config: &BulkheadConfig) -> BTreeMap<String, String> {
             "CLAUDE_CONFIG_DIR".to_owned(),
             PreinstalledAgent::Claude.config_target(&config.remote_user),
         );
-        env.entry("DISABLE_AUTOUPDATER".to_owned())
-            .or_insert_with(|| "1".to_owned());
+        env.insert("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned());
     }
 
     env
@@ -421,10 +416,11 @@ fn build_mounts(
     let mut mounts = Vec::new();
 
     for volume in &config.volume {
+        let target = normalize_container_path(&volume.target)?;
         mounts.push(format!(
             "source=bulkhead-${{localWorkspaceFolderBasename}}-{}-${{devcontainerId}},target={},type=volume",
             sanitize_volume_name(&volume.name),
-            volume.target
+            target
         ));
     }
 
@@ -446,7 +442,8 @@ fn build_mounts(
 
     for path in &config.path {
         let source = resolve_mount_source(workspace, &path.source)?;
-        let mut mount = format!("source={source},target={},type=bind", path.target);
+        let target = normalize_container_path(&path.target)?;
+        let mut mount = format!("source={source},target={target},type=bind");
         if path.access == MountAccess::Ro {
             mount.push_str(",readonly");
         }
@@ -509,17 +506,110 @@ fn reserved_container_env_keys(config: &BulkheadConfig) -> Vec<&'static str> {
 
     if config.agents.contains(&PreinstalledAgent::Claude) {
         keys.push("CLAUDE_CONFIG_DIR");
+        keys.push("DISABLE_AUTOUPDATER");
     }
 
     keys
 }
 
-fn remote_user_home(remote_user: &str) -> String {
-    if remote_user == "root" {
-        "/root".to_owned()
-    } else {
-        format!("/home/{remote_user}")
+const ALLOWED_CAPABILITIES: &[&str] = &["NET_ADMIN", "NET_RAW"];
+
+fn validate_run_args(run_args: &[String]) -> Result<()> {
+    for (index, arg) in run_args.iter().enumerate() {
+        if arg == "--privileged" || arg.starts_with("--privileged=") {
+            bail!("run_args may not enable privileged containers");
+        }
+
+        if matches_flag(arg, "--cap-add") {
+            let cap_value = cap_add_value(run_args, index);
+            match cap_value {
+                Some(cap) if cap.eq_ignore_ascii_case("ALL") => {
+                    bail!("run_args may not add all Linux capabilities");
+                }
+                Some(cap)
+                    if !ALLOWED_CAPABILITIES
+                        .iter()
+                        .any(|allowed| cap.eq_ignore_ascii_case(allowed)) =>
+                {
+                    bail!(
+                        "capability {cap} is not in Bulkhead's allowlist ({})",
+                        ALLOWED_CAPABILITIES.join(", ")
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if matches_flag(arg, "--mount")
+            || matches_flag(arg, "--volume")
+            || matches_flag(arg, "--volumes-from")
+            || is_volume_short_flag(arg)
+        {
+            bail!("host mounts must be declared in bulkhead.toml, not run_args");
+        }
+
+        if matches_flag(arg, "--device") || matches_flag(arg, "--device-cgroup-rule") {
+            bail!("device access must not be configured through run_args");
+        }
+
+        for flag in [
+            "--pid",
+            "--network",
+            "--net",
+            "--ipc",
+            "--uts",
+            "--userns",
+            "--cgroupns",
+        ] {
+            if flag_value_is(run_args, index, flag, "host") {
+                bail!("run_args may not join host namespaces");
+            }
+        }
     }
+
+    Ok(())
+}
+
+fn matches_flag(arg: &str, flag: &str) -> bool {
+    arg == flag || arg.starts_with(&format!("{flag}="))
+}
+
+fn is_volume_short_flag(arg: &str) -> bool {
+    if arg == "-v" {
+        return true;
+    }
+
+    arg.strip_prefix("-v")
+        .and_then(|value| value.chars().next())
+        .is_some_and(|ch| !ch.is_ascii_alphabetic())
+}
+
+fn flag_value_is(args: &[String], index: usize, flag: &str, expected: &str) -> bool {
+    let arg = &args[index];
+    let expected = expected.to_ascii_lowercase();
+
+    if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+        return value.eq_ignore_ascii_case(&expected);
+    }
+
+    arg == flag
+        && args
+            .get(index + 1)
+            .is_some_and(|value| value.eq_ignore_ascii_case(&expected))
+}
+
+fn cap_add_value(args: &[String], index: usize) -> Option<&str> {
+    let arg = &args[index];
+
+    if let Some(value) = arg.strip_prefix("--cap-add=") {
+        return Some(value);
+    }
+
+    if arg == "--cap-add" {
+        return args.get(index + 1).map(|value| value.as_str());
+    }
+
+    None
 }
 
 pub(crate) fn normalize_container_path(path: &str) -> Result<String> {
@@ -527,19 +617,47 @@ pub(crate) fn normalize_container_path(path: &str) -> Result<String> {
         bail!("container paths must be absolute: {path}");
     }
 
-    if path == "/" {
-        return Ok("/".to_owned());
+    let mut segments = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(segment) => segments.push(segment.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                if segments.pop().is_none() {
+                    bail!("container paths must not escape root: {path}");
+                }
+            }
+            Component::Prefix(_) => bail!("container paths must be Unix-style absolute paths"),
+        }
     }
 
-    Ok(path.trim_end_matches('/').to_owned())
+    if segments.is_empty() {
+        Ok("/".to_owned())
+    } else {
+        Ok(format!("/{}", segments.join("/")))
+    }
 }
 
-fn ensure_absolute_container_path(path: &str) -> Result<()> {
-    if !path.starts_with('/') {
-        bail!("container paths must be absolute: {path}");
+fn ensure_not_reserved_container_target(
+    target: &str,
+    reserved_devcontainer_target: &str,
+    reserved_bulkhead_config_target: &str,
+) -> Result<()> {
+    if is_container_path_at_or_under(target, reserved_devcontainer_target) {
+        bail!("{reserved_devcontainer_target} is reserved for Bulkhead's read-only config mount");
+    }
+
+    if is_container_path_at_or_under(target, reserved_bulkhead_config_target) {
+        bail!(
+            "{reserved_bulkhead_config_target} is reserved for Bulkhead's read-only config mount"
+        );
     }
 
     Ok(())
+}
+
+fn is_container_path_at_or_under(path: &str, base: &str) -> bool {
+    path == base || (base != "/" && path.starts_with(&format!("{base}/")))
 }
 
 fn join_container_path(base: &str, segment: &str) -> String {
@@ -634,6 +752,37 @@ run_args = ["--cap-add=SYS_ADMIN"]
     }
 
     #[test]
+    fn rejects_privileged_and_host_mount_run_args() {
+        for raw in [
+            r#"run_args = ["--privileged"]"#,
+            r#"run_args = ["--cap-add=ALL"]"#,
+            r#"run_args = ["--network=host"]"#,
+            r#"run_args = ["--mount", "type=bind,source=/var/run/docker.sock,target=/sock"]"#,
+            r#"run_args = ["-v", "/var/run/docker.sock:/sock"]"#,
+            r#"run_args = ["-v/var/run/docker.sock:/sock"]"#,
+            r#"run_args = ["--device=/dev/kvm"]"#,
+        ] {
+            let config = load_inline_config(raw).unwrap();
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{raw} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn run_args_do_not_treat_verbose_as_volume_mount() {
+        let config = load_inline_config(
+            r#"
+run_args = ["-verbose"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_ok());
+    }
+
+    #[test]
     fn rejects_docker_socket_mount() {
         let config = load_inline_config(
             r#"
@@ -648,9 +797,49 @@ target = "/var/run/docker.sock"
     }
 
     #[test]
+    fn rejects_reserved_mount_target_variants_and_descendants() {
+        for target in [
+            "/workspace/.devcontainer/",
+            "/workspace/./.devcontainer",
+            "/workspace/.devcontainer/devcontainer.json",
+            "/workspace/bulkhead.toml",
+            "/workspace/bulkhead.toml/child",
+        ] {
+            let config = load_inline_config(&format!(
+                r#"
+[[path]]
+source = "drop"
+target = "{target}"
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{target} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_writable_variable_mount_sources() {
+        let config = load_inline_config(
+            r#"
+[[path]]
+source = "${localEnv:HOME}"
+target = "/host-home"
+access = "rw"
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
     fn workspace_folder_is_normalized() {
         assert_eq!(
-            normalize_container_path("/workspace/").unwrap(),
+            normalize_container_path("/workspace/./repo/..").unwrap(),
             "/workspace"
         );
     }
@@ -795,5 +984,245 @@ CLAUDE_CONFIG_DIR = "/tmp/claude"
         .unwrap();
 
         assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn reserved_disable_autoupdater_is_rejected() {
+        let config = load_inline_config(
+            r#"
+agents = ["claude"]
+
+[container_env]
+DISABLE_AUTOUPDATER = "0"
+"#,
+        )
+        .unwrap();
+
+        let result = generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("DISABLE_AUTOUPDATER"),
+            "expected error to mention DISABLE_AUTOUPDATER, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_dangerous_capabilities_not_in_allowlist() {
+        for cap in [
+            "SYS_PTRACE",
+            "SYS_MODULE",
+            "SYS_RAWIO",
+            "SYS_BOOT",
+            "SYS_CHROOT",
+            "DAC_READ_SEARCH",
+        ] {
+            let config = load_inline_config(&format!(
+                r#"
+run_args = ["--cap-add={cap}"]
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "--cap-add={cap} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_allowed_capabilities() {
+        for cap in ["NET_ADMIN", "NET_RAW"] {
+            let config = load_inline_config(&format!(
+                r#"
+run_args = ["--cap-add={cap}"]
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_ok(),
+                "--cap-add={cap} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_capability_in_split_form() {
+        let config = load_inline_config(
+            r#"
+run_args = ["--cap-add", "SYS_PTRACE"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_remote_user() {
+        let config = load_inline_config(
+            r#"
+remote_user = ""
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn rejects_whitespace_only_remote_user() {
+        let config = load_inline_config(
+            r#"
+remote_user = "   "
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn rejects_remote_user_with_special_chars() {
+        for user in [
+            "user!name",
+            "user@host",
+            "user/name",
+            "user name",
+            "user;rm",
+        ] {
+            let config = load_inline_config(&format!(
+                r#"
+remote_user = "{user}"
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "remote_user `{user}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_remote_users() {
+        for user in ["vscode", "root", "my-user", "user_1", "user.name"] {
+            let config = load_inline_config(&format!(
+                r#"
+remote_user = "{user}"
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_ok(),
+                "remote_user `{user}` should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_container_path_rejects_relative() {
+        assert!(normalize_container_path("relative/path").is_err());
+    }
+
+    #[test]
+    fn normalize_container_path_rejects_root_escape() {
+        assert!(normalize_container_path("/..").is_err());
+        assert!(normalize_container_path("/../etc").is_err());
+    }
+
+    #[test]
+    fn normalize_container_path_normalizes_dots_and_slashes() {
+        assert_eq!(normalize_container_path("/a/./b").unwrap(), "/a/b");
+        assert_eq!(normalize_container_path("/a/b/../c").unwrap(), "/a/c");
+        assert_eq!(normalize_container_path("/a/b/c/../../d").unwrap(), "/a/d");
+    }
+
+    #[test]
+    fn normalize_container_path_handles_root() {
+        assert_eq!(normalize_container_path("/").unwrap(), "/");
+        assert_eq!(normalize_container_path("/.").unwrap(), "/");
+    }
+
+    #[test]
+    fn normalize_container_path_handles_trailing_slash() {
+        assert_eq!(
+            normalize_container_path("/workspace/").unwrap(),
+            "/workspace"
+        );
+    }
+
+    #[test]
+    fn rejects_privileged_with_value() {
+        let config = load_inline_config(
+            r#"
+run_args = ["--privileged=true"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn rejects_host_namespace_in_split_form() {
+        for flag in ["--pid", "--network", "--net", "--ipc", "--uts", "--userns"] {
+            let config = load_inline_config(&format!(
+                r#"
+run_args = ["{flag}", "host"]
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{flag} host (split) should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_volumes_from_flag() {
+        let config = load_inline_config(
+            r#"
+run_args = ["--volumes-from=other-container"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn rejects_cap_add_all_case_insensitive() {
+        for variant in ["--cap-add=all", "--cap-add=All", "--cap-add=ALL"] {
+            let config = load_inline_config(&format!(
+                r#"
+run_args = ["{variant}"]
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{variant} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_safe_run_args() {
+        let config = load_inline_config(
+            r#"
+run_args = ["--cpus=2", "--memory=4g", "--name=my-container"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_ok());
     }
 }

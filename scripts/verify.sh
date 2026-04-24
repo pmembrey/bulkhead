@@ -21,6 +21,9 @@ fi
 echo "verify: cargo fmt --all -- --check"
 cargo fmt --all -- --check
 
+echo "verify: bash -n templates/bulkhead-post-create.sh"
+bash -n templates/bulkhead-post-create.sh
+
 echo "verify: cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets -- -D warnings
 

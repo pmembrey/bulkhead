@@ -162,21 +162,22 @@ A few important points:
 - `remote_user` is set from the host username when a template is created
 - the bundled Dockerfile makes `remote_user` the actual non-root account in the container, not just the exec target
 - `[build]` points at the Dockerfile and build context to use, relative to the workspace root
-- the bundled Dockerfile is Rust-oriented by default and keeps the base devcontainer bash setup intact, but you can point `[build]` at another Dockerfile in your repo if your workflow is different
+- the bundled Dockerfile is Rust-oriented by default, pins its base image and bundled tool versions, and keeps the base devcontainer bash setup intact, but you can point `[build]` at another Dockerfile in your repo if your workflow is different
 - if you replace the bundled Dockerfile, your custom build is responsible for creating whatever `remote_user` you configure
-- `agents` preinstalls supported agent CLIs inside the container and attaches persistent config volumes for them
+- `features` is allowlisted to Bulkhead-supported Dev Container Features, because features can carry their own runtime metadata
+- `agents` preinstalls pinned supported agent CLIs inside the container and attaches persistent config volumes for them
 - currently supported agents are `claude`, `codex`, and `pi`
 - `claude` forwards `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from the host and persists config under `~/.claude` in the container
 - if `CLAUDE_CODE_OAUTH_TOKEN` is set, Bulkhead also tries to seed Claude auth during post-create so headless setup can avoid the browser login flow
 - if neither `ANTHROPIC_API_KEY` nor `CLAUDE_CODE_OAUTH_TOKEN` is set, expect a one-time Claude login inside the container; the persisted `~/.claude` volume keeps that auth state across rebuilds
 - `codex` forwards `OPENAI_API_KEY` from the host and persists config under `~/.codex` in the container
-- `pi` forwards `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`, persists config under `~/.pi`, and installs `@mariozechner/pi-coding-agent` after bootstrapping the latest `nvm` release plus a current Node runtime during post-create
+- `pi` forwards `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`, persists config under `~/.pi`, and installs `@mariozechner/pi-coding-agent` after bootstrapping pinned `nvm` and Node versions during post-create
 - `[git]` is a dedicated managed feature for mounting host `~/.gitconfig` read-only into the container user's home
 - extra host paths live under `[[path]]`
 - `access` defaults to read-only unless you explicitly request write access
-- writable `[[path]]` mounts must resolve to plain host paths; variable-based sources such as `${localEnv:...}` are allowed only for read-only mounts
+- `[[path]]` sources must resolve to plain host paths; variable-based sources such as `${localEnv:...}` are not allowed
 - mount targets are normalized and may not point at or under Bulkhead's read-only `/workspace/.devcontainer` or `/workspace/bulkhead.toml` mounts
-- `run_args` is allowed for narrow Docker options, but Bulkhead rejects flags that would bypass its host-access policy, including privileged mode, host bind mounts, devices, host namespaces, `SYS_ADMIN`, and `--cap-add=ALL`
+- `run_args` is allowed for narrow Docker options, but Bulkhead rejects flags that would bypass its host-access policy, including privileged mode, host bind mounts, devices, host namespaces, Docker security options, and any `--cap-add` value outside the `NET_ADMIN` / `NET_RAW` allowlist
 
 ## Isolated Clones
 
@@ -242,7 +243,7 @@ Defaults:
 - `.devcontainer` mounted read-only
 - `bulkhead.toml` mounted read-only
 - no Docker socket mount
-- dangerous Docker runtime flags rejected, including privileged mode, host bind mounts, devices, host namespaces, `SYS_ADMIN`, and `--cap-add=ALL`
+- dangerous Docker runtime flags rejected, including privileged mode, host bind mounts, devices, host namespaces, Docker security options, and any `--cap-add` value outside the `NET_ADMIN` / `NET_RAW` allowlist
 - minimal host mounts unless explicitly configured
 
 Still true:

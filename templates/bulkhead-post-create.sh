@@ -3,6 +3,10 @@ set -euo pipefail
 
 selected_agents="${BULKHEAD_SELECTED_AGENTS:-}"
 readonly NVM_VERSION="v0.40.4"
+readonly NODE_VERSION="v22.22.2"
+readonly CLAUDE_CODE_VERSION="2.1.119"
+readonly CODEX_VERSION="0.124.0"
+readonly PI_AGENT_VERSION="0.70.0"
 
 if [[ -z "${selected_agents}" ]]; then
   exit 0
@@ -88,18 +92,13 @@ ensure_global_binary_on_path() {
 install_npm_agent() {
   local package_name="$1"
   local command_name="$2"
-  local global_bin
 
   ensure_npm
-  global_bin="$(npm prefix -g)/bin/${command_name}"
-
-  if [[ ! -x "${global_bin}" ]]; then
-    env \
-      NPM_CONFIG_AUDIT=false \
-      NPM_CONFIG_FUND=false \
-      NPM_CONFIG_IGNORE_SCRIPTS=false \
-      npm install -g "${package_name}"
-  fi
+  env \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_IGNORE_SCRIPTS=false \
+    npm install -g "${package_name}"
 
   ensure_global_binary_on_path "${command_name}"
 }
@@ -140,7 +139,7 @@ install_nvm() {
     return 0
   fi
 
-  curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | PROFILE=/dev/null bash
+  curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | PROFILE=/dev/null bash
   ensure_nvm_shell_init
   load_nvm
 }
@@ -158,10 +157,10 @@ link_nvm_runtime_binaries() {
   fi
 }
 
-ensure_latest_nvm_node() {
+ensure_pinned_nvm_node() {
   install_nvm
-  nvm install node --latest-npm
-  nvm alias default node >/dev/null
+  nvm install "${NODE_VERSION}"
+  nvm alias default "${NODE_VERSION}" >/dev/null
   nvm use default >/dev/null
   link_nvm_runtime_binaries
 }
@@ -253,18 +252,18 @@ bootstrap_claude_auth() {
 
 if has_agent "pi"; then
   mkdir -p "${HOME}/.pi"
-  ensure_latest_nvm_node
-  install_npm_agent "@mariozechner/pi-coding-agent" "pi"
+  ensure_pinned_nvm_node
+  install_npm_agent "@mariozechner/pi-coding-agent@${PI_AGENT_VERSION}" "pi"
 fi
 
 if has_agent "claude"; then
   ensure_writable_dir "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
-  install_npm_agent "@anthropic-ai/claude-code" "claude"
+  install_npm_agent "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "claude"
   bootstrap_claude_auth
   configure_claude
 fi
 
 if has_agent "codex"; then
   ensure_writable_dir "${HOME}/.codex"
-  install_npm_agent "@openai/codex" "codex"
+  install_npm_agent "@openai/codex@${CODEX_VERSION}" "codex"
 fi

@@ -33,10 +33,9 @@ target = "/commandhistory"
 
 # Bulkhead always mounts the current directory read-write at `/workspace`, so the
 # code you run in the container can fully modify the repo you launched from.
-# Add more host paths only when you want them. `source` may be absolute,
-# relative to the workspace root, use `~/...`, or use devcontainer variables for
-# read-only mounts. Writable mounts must use plain host paths. `access` defaults
-# to "ro" if omitted.
+# Add more host paths only when you want them. `source` may be absolute, relative
+# to the workspace root, or use `~/...`. Variable-based sources are not allowed.
+# `access` defaults to "ro" if omitted.
 # The managed `[git]` block above mounts your host `~/.gitconfig` read-only at
 # the remote user's home directory.
 # Set `agents = ["claude", "codex", "pi"]` to preinstall supported agent CLIs and

@@ -17,7 +17,9 @@ use crate::system::{
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DOCKERFILE: &str = include_str!("../../templates/Dockerfile");
 const POST_CREATE_SCRIPT: &str = include_str!("../../templates/bulkhead-post-create.sh");
@@ -332,37 +334,111 @@ pub(crate) fn write_workspace_template(
     let bulkhead_toml_path = config_path(workspace);
     let dockerfile_path = devcontainer_dir.join("Dockerfile");
     let post_create_script_path = devcontainer_dir.join("bulkhead-post-create.sh");
-    let files = [
-        &bulkhead_toml_path,
-        &dockerfile_path,
-        &post_create_script_path,
-    ];
+    ensure_template_path_is_not_symlink(&devcontainer_dir, "template directory")?;
 
-    if !force {
-        for path in files {
-            if path.exists() {
-                bail!(
-                    "{} already exists. Re-run with --force to overwrite the template.",
-                    path.display()
-                );
+    fs::create_dir_all(&devcontainer_dir)
+        .with_context(|| format!("failed to create {}", devcontainer_dir.display()))?;
+    ensure_template_path_is_not_symlink(&devcontainer_dir, "template directory")?;
+
+    write_template_file(
+        &bulkhead_toml_path,
+        &instantiate_template(preset.template())?,
+        force,
+    )?;
+    write_template_file(&dockerfile_path, DOCKERFILE, force)?;
+    write_template_file(&post_create_script_path, POST_CREATE_SCRIPT, force)?;
+
+    render_workspace_devcontainer(workspace)
+}
+
+fn ensure_template_path_is_not_symlink(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("{description} must not be a symlink: {}", path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn ensure_template_destination_is_safe(path: &Path, force: bool) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing to write template through symlink: {}",
+                path.display()
+            )
+        }
+        Ok(_) if !force => bail!(
+            "{} already exists. Re-run with --force to overwrite the template.",
+            path.display()
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn write_template_file(path: &Path, contents: &str, force: bool) -> Result<()> {
+    ensure_template_destination_is_safe(path, force)?;
+
+    let tmp_path = create_template_temp_file(path, contents)?;
+    ensure_template_destination_is_safe(path, force)?;
+
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error).with_context(|| format!("failed to write {}", path.display()));
+    }
+
+    Ok(())
+}
+
+fn create_template_temp_file(path: &Path, contents: &str) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{} has no valid file name", path.display()))?;
+
+    for attempt in 0..100 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_path = parent.join(format!(
+            ".{file_name}.bulkhead-tmp-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(contents.as_bytes()) {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(error)
+                        .with_context(|| format!("failed to write {}", tmp_path.display()));
+                }
+
+                return Ok(tmp_path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to create {}", tmp_path.display()));
             }
         }
     }
 
-    fs::create_dir_all(&devcontainer_dir)
-        .with_context(|| format!("failed to create {}", devcontainer_dir.display()))?;
-
-    fs::write(
-        &bulkhead_toml_path,
-        instantiate_template(preset.template())?,
+    bail!(
+        "failed to create a temporary template file for {}",
+        path.display()
     )
-    .with_context(|| format!("failed to write {}", bulkhead_toml_path.display()))?;
-    fs::write(&dockerfile_path, DOCKERFILE)
-        .with_context(|| format!("failed to write {}", dockerfile_path.display()))?;
-    fs::write(&post_create_script_path, POST_CREATE_SCRIPT)
-        .with_context(|| format!("failed to write {}", post_create_script_path.display()))?;
-
-    render_workspace_devcontainer(workspace)
 }
 
 pub(crate) fn bootstrap_workspace_template_if_missing(
@@ -423,4 +499,70 @@ fn start_workspace(workspace: &Path, rebuild: bool) -> Result<()> {
     }
 
     run_command("devcontainer", &args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{write_template_file, write_workspace_template};
+    use crate::config::Preset;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
+    #[cfg(unix)]
+    #[test]
+    fn template_write_rejects_symlink_destination_even_with_force() {
+        let root = unique_test_dir("bulkhead-template-file-symlink");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("bulkhead.toml"), "outside").unwrap();
+        symlink(
+            outside.join("bulkhead.toml"),
+            workspace.join("bulkhead.toml"),
+        )
+        .unwrap();
+
+        let error = write_template_file(&workspace.join("bulkhead.toml"), "new", true)
+            .unwrap_err()
+            .to_string();
+        let outside_contents = fs::read_to_string(outside.join("bulkhead.toml")).unwrap();
+
+        let _ = fs::remove_dir_all(root);
+
+        assert!(error.contains("refusing to write template through symlink"));
+        assert_eq!(outside_contents, "outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_install_rejects_symlinked_devcontainer_directory() {
+        let root = unique_test_dir("bulkhead-template-dir-symlink");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, workspace.join(".devcontainer")).unwrap();
+
+        let error = write_workspace_template(&workspace, Preset::Minimal, true)
+            .unwrap_err()
+            .to_string();
+
+        let _ = fs::remove_dir_all(root);
+
+        assert!(error.contains("template directory must not be a symlink"));
+    }
+
+    #[cfg(unix)]
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    }
 }

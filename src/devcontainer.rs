@@ -14,6 +14,7 @@ use std::path::{Component, Path};
 const DEVCONTAINER_SCHEMA: &str =
     "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json";
 const NODE_FEATURE: &str = "ghcr.io/devcontainers/features/node:1";
+const ALLOWED_FEATURES: &[&str] = &["ghcr.io/devcontainers/features/github-cli:1", NODE_FEATURE];
 const POST_CREATE_SCRIPT_NAME: &str = "bulkhead-post-create.sh";
 
 #[derive(Debug, Serialize)]
@@ -32,7 +33,7 @@ pub(crate) struct GeneratedDevcontainer {
     container_user: String,
     #[serde(rename = "remoteUser")]
     remote_user: String,
-    mounts: Vec<String>,
+    mounts: Vec<MountSpec>,
     #[serde(rename = "containerEnv")]
     container_env: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", rename = "remoteEnv")]
@@ -41,7 +42,7 @@ pub(crate) struct GeneratedDevcontainer {
     #[serde(skip_serializing_if = "Option::is_none", rename = "initializeCommand")]
     initialize_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "postCreateCommand")]
-    post_create_command: Option<String>,
+    post_create_command: Option<Vec<String>>,
     #[serde(rename = "workspaceMount")]
     workspace_mount: String,
     #[serde(rename = "workspaceFolder")]
@@ -53,6 +54,36 @@ struct BuildSpec {
     context: String,
     dockerfile: String,
     args: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+struct MountSpec {
+    source: String,
+    target: String,
+    #[serde(rename = "type")]
+    mount_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readonly: Option<bool>,
+}
+
+impl MountSpec {
+    fn bind(source: String, target: String, readonly: bool) -> Self {
+        Self {
+            source,
+            target,
+            mount_type: "bind",
+            readonly: readonly.then_some(true),
+        }
+    }
+
+    fn volume(source: String, target: String) -> Self {
+        Self {
+            source,
+            target,
+            mount_type: "volume",
+            readonly: None,
+        }
+    }
 }
 
 pub(crate) fn render_workspace_devcontainer(workspace: &Path) -> Result<()> {
@@ -136,6 +167,7 @@ pub(crate) fn generate_devcontainer(
     validate_config(workspace, config)?;
 
     let workspace_folder = normalize_container_path(&config.workspace_folder)?;
+    ensure_mount_string_value_safe(&workspace_folder, "workspace_folder")?;
     let devcontainer_target = join_container_path(&workspace_folder, ".devcontainer");
     let bulkhead_config_target = join_container_path(&workspace_folder, "bulkhead.toml");
     let dockerfile_path = resolve_workspace_config_path(workspace, &config.build.dockerfile)?;
@@ -202,14 +234,10 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
     let dockerfile_path = resolve_workspace_config_path(workspace, &config.build.dockerfile)?;
     let context_path = resolve_workspace_config_path(workspace, &config.build.context)?;
 
-    if !dockerfile_path.starts_with(workspace) {
-        bail!("build.dockerfile must stay within the workspace");
-    }
+    ensure_config_path_stays_within_workspace(workspace, &dockerfile_path, "build.dockerfile")?;
+    ensure_config_path_stays_within_workspace(workspace, &context_path, "build.context")?;
 
-    if !context_path.starts_with(workspace) {
-        bail!("build.context must stay within the workspace");
-    }
-
+    validate_features(&config.features)?;
     validate_run_args(&config.run_args)?;
 
     let mut targets = BTreeSet::new();
@@ -286,16 +314,16 @@ pub(crate) fn validate_config(workspace: &Path, config: &BulkheadConfig) -> Resu
             &reserved_bulkhead_config_target,
         )?;
 
+        if path.source.contains("${") {
+            bail!("mount sources may not use variables; use plain host paths instead");
+        }
+
         let source = resolve_mount_source(workspace, &path.source)?;
         let source_lower = source.to_ascii_lowercase();
         let target_lower = target.to_ascii_lowercase();
 
         if source_lower.contains("docker.sock") || target_lower.contains("docker.sock") {
             bail!("mounting the Docker socket is not allowed");
-        }
-
-        if path.access == MountAccess::Rw && path.source.contains("${") {
-            bail!("writable mounts may not use variable-based host sources");
         }
 
         if let Some(resolved_home) = resolve_plain_host_path(workspace, &path.source, &home_dir) {
@@ -334,6 +362,22 @@ fn build_features(config: &BulkheadConfig) -> BTreeMap<String, Value> {
     }
 
     features
+}
+
+fn validate_features(features: &[String]) -> Result<()> {
+    for feature in features {
+        if !ALLOWED_FEATURES
+            .iter()
+            .any(|allowed| feature.eq_ignore_ascii_case(allowed))
+        {
+            bail!(
+                "feature {feature} is not in Bulkhead's allowlist ({})",
+                ALLOWED_FEATURES.join(", ")
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn build_container_env(config: &BulkheadConfig) -> BTreeMap<String, String> {
@@ -412,49 +456,58 @@ fn build_mounts(
     config: &BulkheadConfig,
     devcontainer_target: &str,
     bulkhead_config_target: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<MountSpec>> {
     let mut mounts = Vec::new();
 
     for volume in &config.volume {
         let target = normalize_container_path(&volume.target)?;
-        mounts.push(format!(
-            "source=bulkhead-${{localWorkspaceFolderBasename}}-{}-${{devcontainerId}},target={},type=volume",
-            sanitize_volume_name(&volume.name),
-            target
+        mounts.push(MountSpec::volume(
+            format!(
+                "bulkhead-${{localWorkspaceFolderBasename}}-{}-${{devcontainerId}}",
+                sanitize_volume_name(&volume.name)
+            ),
+            target,
         ));
     }
 
     if config.git.enabled {
         let source = resolve_mount_source(workspace, "~/.gitconfig")?;
-        mounts.push(format!(
-            "source={source},target={},type=bind,readonly",
-            gitconfig_target(&config.remote_user)
+        mounts.push(MountSpec::bind(
+            source,
+            gitconfig_target(&config.remote_user),
+            true,
         ));
     }
 
     for agent in &config.agents {
-        mounts.push(format!(
-            "source=bulkhead-${{localWorkspaceFolderBasename}}-{}-${{devcontainerId}},target={},type=volume",
-            agent.as_str(),
-            agent.config_target(&config.remote_user)
+        mounts.push(MountSpec::volume(
+            format!(
+                "bulkhead-${{localWorkspaceFolderBasename}}-{}-${{devcontainerId}}",
+                agent.as_str()
+            ),
+            agent.config_target(&config.remote_user),
         ));
     }
 
     for path in &config.path {
         let source = resolve_mount_source(workspace, &path.source)?;
         let target = normalize_container_path(&path.target)?;
-        let mut mount = format!("source={source},target={target},type=bind");
-        if path.access == MountAccess::Ro {
-            mount.push_str(",readonly");
-        }
-        mounts.push(mount);
+        mounts.push(MountSpec::bind(
+            source,
+            target,
+            path.access == MountAccess::Ro,
+        ));
     }
 
-    mounts.push(format!(
-        "source=${{localWorkspaceFolder}}/.devcontainer,target={devcontainer_target},type=bind,readonly"
+    mounts.push(MountSpec::bind(
+        "${localWorkspaceFolder}/.devcontainer".to_owned(),
+        devcontainer_target.to_owned(),
+        true,
     ));
-    mounts.push(format!(
-        "source=${{localWorkspaceFolder}}/bulkhead.toml,target={bulkhead_config_target},type=bind,readonly"
+    mounts.push(MountSpec::bind(
+        "${localWorkspaceFolder}/bulkhead.toml".to_owned(),
+        bulkhead_config_target.to_owned(),
+        true,
     ));
 
     Ok(mounts)
@@ -468,14 +521,15 @@ fn initialize_command(config: &BulkheadConfig) -> Option<String> {
     None
 }
 
-fn post_create_command(config: &BulkheadConfig, devcontainer_target: &str) -> Option<String> {
+fn post_create_command(config: &BulkheadConfig, devcontainer_target: &str) -> Option<Vec<String>> {
     if config.agents.is_empty() {
         return None;
     }
 
-    Some(format!(
-        "bash {devcontainer_target}/{POST_CREATE_SCRIPT_NAME}"
-    ))
+    Some(vec![
+        "bash".to_owned(),
+        format!("{devcontainer_target}/{POST_CREATE_SCRIPT_NAME}"),
+    ])
 }
 
 fn default_customizations() -> Value {
@@ -510,6 +564,32 @@ fn reserved_container_env_keys(config: &BulkheadConfig) -> Vec<&'static str> {
     }
 
     keys
+}
+
+fn ensure_config_path_stays_within_workspace(
+    workspace: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<()> {
+    let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let path = resolve_path_for_policy_checks(path);
+
+    if !path.starts_with(&workspace) {
+        bail!("{label} must stay within the workspace");
+    }
+
+    Ok(())
+}
+
+fn ensure_mount_string_value_safe(value: &str, label: &str) -> Result<()> {
+    if value
+        .chars()
+        .any(|ch| ch == ',' || ch == '=' || ch.is_control())
+    {
+        bail!("{label} may not contain commas, equals signs, or control characters");
+    }
+
+    Ok(())
 }
 
 const ALLOWED_CAPABILITIES: &[&str] = &["NET_ADMIN", "NET_RAW"];
@@ -550,6 +630,10 @@ fn validate_run_args(run_args: &[String]) -> Result<()> {
 
         if matches_flag(arg, "--device") || matches_flag(arg, "--device-cgroup-rule") {
             bail!("device access must not be configured through run_args");
+        }
+
+        if matches_flag(arg, "--security-opt") {
+            bail!("security options must not be configured through run_args");
         }
 
         for flag in [
@@ -674,13 +758,34 @@ fn join_container_path(base: &str, segment: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_devcontainer, normalize_container_path};
+    use super::{GeneratedDevcontainer, generate_devcontainer, normalize_container_path};
     use crate::config::{
         AGENT_PRESET_TOML, AUDIT_PRESET_TOML, BulkheadConfig, MINIMAL_PRESET_TOML,
         gitconfig_target, instantiate_template, load_inline_config,
     };
     use serde_json::json;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn has_mount(
+        generated: &GeneratedDevcontainer,
+        source: Option<&str>,
+        target: &str,
+        mount_type: &str,
+        readonly: Option<bool>,
+    ) -> bool {
+        generated.mounts.iter().any(|mount| {
+            source.is_none_or(|source| mount.source == source)
+                && mount.target == target
+                && mount.mount_type == mount_type
+                && mount.readonly == readonly
+        })
+    }
 
     #[test]
     fn template_config_renders() {
@@ -694,23 +799,27 @@ mod tests {
             generated.build.args.get("BULKHEAD_REMOTE_USER"),
             Some(&config.remote_user)
         );
-        assert!(
-            generated
-                .mounts
-                .iter()
-                .any(|mount| mount.contains("target=/workspace/.devcontainer")
-                    && mount.contains("readonly"))
-        );
-        assert!(
-            generated
-                .mounts
-                .iter()
-                .any(|mount| mount.contains("target=/workspace/bulkhead.toml")
-                    && mount.contains("readonly"))
-        );
-        assert!(generated.mounts.iter().any(|mount| {
-            mount.contains(&format!("target={}", gitconfig_target(&config.remote_user)))
-        }));
+        assert!(has_mount(
+            &generated,
+            Some("${localWorkspaceFolder}/.devcontainer"),
+            "/workspace/.devcontainer",
+            "bind",
+            Some(true)
+        ));
+        assert!(has_mount(
+            &generated,
+            Some("${localWorkspaceFolder}/bulkhead.toml"),
+            "/workspace/bulkhead.toml",
+            "bind",
+            Some(true)
+        ));
+        assert!(has_mount(
+            &generated,
+            None,
+            &gitconfig_target(&config.remote_user),
+            "bind",
+            Some(true)
+        ));
         assert!(generated.run_args.is_empty());
     }
 
@@ -729,14 +838,13 @@ access = "rw"
         .unwrap();
 
         let generated = generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).unwrap();
-        assert!(
-            generated.mounts.iter().any(
-                |mount| mount.contains("source=/tmp/bulkhead-test/drop,target=/drop,type=bind")
-            )
-        );
-        assert!(generated.mounts.iter().all(|mount| {
-            !mount.contains("source=/tmp/bulkhead-test/drop,target=/drop,type=bind,readonly")
-        }));
+        assert!(has_mount(
+            &generated,
+            Some("/tmp/bulkhead-test/drop"),
+            "/drop",
+            "bind",
+            None
+        ));
     }
 
     #[test]
@@ -837,6 +945,21 @@ access = "rw"
     }
 
     #[test]
+    fn rejects_readonly_variable_mount_sources() {
+        let config = load_inline_config(
+            r#"
+[[path]]
+source = "${localEnv:HOME}"
+target = "/host-home"
+access = "ro"
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
     fn workspace_folder_is_normalized() {
         assert_eq!(
             normalize_container_path("/workspace/./repo/..").unwrap(),
@@ -866,8 +989,35 @@ access = "rw"
             generated
                 .mounts
                 .iter()
-                .all(|mount| !mount.contains("/.gitconfig"))
+                .all(|mount| !mount.target.ends_with("/.gitconfig"))
         );
+    }
+
+    #[test]
+    fn rejects_unknown_features() {
+        let config = load_inline_config(
+            r#"
+features = ["ghcr.io/example/unsafe-feature:1"]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err());
+    }
+
+    #[test]
+    fn accepts_allowlisted_features() {
+        let config = load_inline_config(
+            r#"
+features = [
+    "ghcr.io/devcontainers/features/github-cli:1",
+    "ghcr.io/devcontainers/features/node:1",
+]
+"#,
+        )
+        .unwrap();
+
+        assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_ok());
     }
 
     #[test]
@@ -903,15 +1053,27 @@ agents = ["claude", "codex", "pi"]
             generated.features.get(super::NODE_FEATURE),
             Some(&json!({ "version": "22" }))
         );
-        assert!(generated.mounts.iter().any(|mount| {
-            mount.contains("target=/home/agent/.claude") && mount.contains("type=volume")
-        }));
-        assert!(generated.mounts.iter().any(|mount| {
-            mount.contains("target=/home/agent/.codex") && mount.contains("type=volume")
-        }));
-        assert!(generated.mounts.iter().any(|mount| {
-            mount.contains("target=/home/agent/.pi") && mount.contains("type=volume")
-        }));
+        assert!(has_mount(
+            &generated,
+            None,
+            "/home/agent/.claude",
+            "volume",
+            None
+        ));
+        assert!(has_mount(
+            &generated,
+            None,
+            "/home/agent/.codex",
+            "volume",
+            None
+        ));
+        assert!(has_mount(
+            &generated,
+            None,
+            "/home/agent/.pi",
+            "volume",
+            None
+        ));
         assert_eq!(
             generated.container_env.get("BULKHEAD_SELECTED_AGENTS"),
             Some(&"claude,codex,pi".to_owned())
@@ -930,7 +1092,10 @@ agents = ["claude", "codex", "pi"]
         );
         assert_eq!(
             generated.post_create_command,
-            Some("bash /workspace/.devcontainer/bulkhead-post-create.sh".to_owned())
+            Some(vec![
+                "bash".to_owned(),
+                "/workspace/.devcontainer/bulkhead-post-create.sh".to_owned()
+            ])
         );
     }
 
@@ -946,9 +1111,13 @@ agents = ["pi"]
 
         let generated = generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).unwrap();
 
-        assert!(generated.mounts.iter().any(|mount| {
-            mount.contains("target=/home/agent/.pi") && mount.contains("type=volume")
-        }));
+        assert!(has_mount(
+            &generated,
+            None,
+            "/home/agent/.pi",
+            "volume",
+            None
+        ));
         assert_eq!(
             generated.remote_env.get("OPENAI_API_KEY"),
             Some(&"${localEnv:OPENAI_API_KEY:}".to_owned())
@@ -1215,6 +1384,115 @@ run_args = ["{variant}"]
     }
 
     #[test]
+    fn rejects_security_opt_run_args() {
+        for raw in [
+            r#"run_args = ["--security-opt=seccomp=unconfined"]"#,
+            r#"run_args = ["--security-opt", "apparmor=unconfined"]"#,
+            r#"run_args = ["--security-opt=label=disable"]"#,
+            r#"run_args = ["--security-opt=systempaths=unconfined"]"#,
+        ] {
+            let config = load_inline_config(raw).unwrap();
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{raw} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_workspace_folder_mount_string_metacharacters() {
+        for workspace_folder in ["/work,space", "/work=space", "/work\\nspace"] {
+            let config = load_inline_config(&format!(
+                r#"
+workspace_folder = "{workspace_folder}"
+"#
+            ))
+            .unwrap();
+
+            assert!(
+                generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_err(),
+                "{workspace_folder} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_structured_mount_objects() {
+        let config = load_inline_config(
+            r#"
+[[path]]
+source = "drop"
+target = "/drop"
+"#,
+        )
+        .unwrap();
+
+        let generated = generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).unwrap();
+        let rendered = serde_json::to_value(&generated).unwrap();
+        let drop_mount = rendered["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["target"] == "/drop")
+            .unwrap();
+
+        assert_eq!(drop_mount["source"], "/tmp/bulkhead-test/drop");
+        assert_eq!(drop_mount["type"], "bind");
+        assert_eq!(drop_mount["readonly"], true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_build_dockerfile_symlink_that_escapes_workspace() {
+        let root = unique_test_dir("bulkhead-dockerfile-symlink");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("Dockerfile"), "FROM scratch\n").unwrap();
+        symlink(outside.join("Dockerfile"), workspace.join("Dockerfile")).unwrap();
+
+        let config = load_inline_config(
+            r#"
+[build]
+dockerfile = "Dockerfile"
+context = "."
+"#,
+        )
+        .unwrap();
+
+        let result = generate_devcontainer(&workspace, &config);
+        let _ = fs::remove_dir_all(root);
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_build_context_symlink_that_escapes_workspace() {
+        let root = unique_test_dir("bulkhead-context-symlink");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, workspace.join("context-link")).unwrap();
+
+        let config = load_inline_config(
+            r#"
+[build]
+dockerfile = "Dockerfile"
+context = "context-link"
+"#,
+        )
+        .unwrap();
+
+        let result = generate_devcontainer(&workspace, &config);
+        let _ = fs::remove_dir_all(root);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn accepts_safe_run_args() {
         let config = load_inline_config(
             r#"
@@ -1224,5 +1502,14 @@ run_args = ["--cpus=2", "--memory=4g", "--name=my-container"]
         .unwrap();
 
         assert!(generate_devcontainer(Path::new("/tmp/bulkhead-test"), &config).is_ok());
+    }
+
+    #[cfg(unix)]
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
     }
 }

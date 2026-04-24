@@ -4,8 +4,8 @@ use crate::cli::CloneCommands;
 use crate::config::{Preset, existing_directory};
 use crate::prompt::{confirm, is_interactive_terminal};
 use crate::system::{
-    capture_stdout, capture_stdout_in_dir, command_output_in_dir, ensure_command, run_command,
-    run_command_in_dir,
+    capture_stdout, capture_stdout_in_dir, command_output_in_dir, ensure_command, render_command,
+    run_command, run_command_in_dir,
 };
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
@@ -484,12 +484,6 @@ fn command_stdout_in_dir(program: &str, args: &[&str], directory: &Path) -> Resu
         render_command(program, args),
         stderr.trim()
     )
-}
-
-fn render_command(program: &str, args: &[&str]) -> String {
-    let mut rendered = vec![program.to_owned()];
-    rendered.extend(args.iter().map(|arg| arg.to_string()));
-    rendered.join(" ")
 }
 
 #[cfg(test)]

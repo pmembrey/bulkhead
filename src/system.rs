@@ -258,7 +258,7 @@ pub(crate) fn command_output_in_dir(
         .with_context(|| format!("failed to run {}", render_command(program, args)))
 }
 
-fn render_command<I, S>(program: &str, args: I) -> String
+pub(crate) fn render_command<I, S>(program: &str, args: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

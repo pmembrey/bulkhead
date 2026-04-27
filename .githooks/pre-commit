@@ -4,5 +4,14 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
 
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is required but was not found" >&2
+  echo "install it with: brew install gitleaks" >&2
+  exit 1
+fi
+
+echo "pre-commit: gitleaks git --staged --redact --no-banner"
+gitleaks git --staged --redact --no-banner
+
 echo "pre-commit: ./scripts/verify.sh"
 ./scripts/verify.sh

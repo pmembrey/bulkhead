@@ -1,8 +1,7 @@
-use crate::system::capture_stdout;
+use crate::system::{DOCKER_PROBE_TIMEOUT, capture_stdout, command_output_with_timeout};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 #[derive(Debug, Deserialize)]
 struct DockerMount {
@@ -29,19 +28,23 @@ pub(crate) enum BuildxHealth {
 }
 
 pub(crate) fn docker_daemon_running() -> bool {
-    Command::new("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    command_output_with_timeout(
+        "docker",
+        &["version", "--format", "{{.Server.Version}}"],
+        DOCKER_PROBE_TIMEOUT,
+    )
+    .is_ok_and(|output| output.is_some_and(|o| o.status.success()))
 }
 
 pub(crate) fn probe_buildx_health() -> Result<Option<BuildxHealth>> {
-    let version = Command::new("docker")
-        .args(["buildx", "version"])
-        .output()
-        .context("failed to probe docker buildx")?;
+    let Some(version) =
+        command_output_with_timeout("docker", &["buildx", "version"], DOCKER_PROBE_TIMEOUT)
+            .context("failed to probe docker buildx")?
+    else {
+        return Ok(Some(BuildxHealth::Error(
+            "docker buildx version timed out".to_owned(),
+        )));
+    };
 
     if !version.status.success() {
         let stderr = String::from_utf8_lossy(&version.stderr).trim().to_owned();
@@ -51,10 +54,14 @@ pub(crate) fn probe_buildx_health() -> Result<Option<BuildxHealth>> {
         return Ok(Some(BuildxHealth::Error(stderr)));
     }
 
-    let inspect = Command::new("docker")
-        .args(["buildx", "inspect"])
-        .output()
-        .context("failed to inspect docker buildx")?;
+    let Some(inspect) =
+        command_output_with_timeout("docker", &["buildx", "inspect"], DOCKER_PROBE_TIMEOUT)
+            .context("failed to inspect docker buildx")?
+    else {
+        return Ok(Some(BuildxHealth::Error(
+            "docker buildx inspect timed out".to_owned(),
+        )));
+    };
 
     if inspect.status.success() {
         return Ok(Some(BuildxHealth::Ready));

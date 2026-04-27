@@ -10,10 +10,11 @@ Enable the repo-managed Git hooks in your clone:
 git config core.hooksPath .githooks
 ```
 
-Install `cargo-deny` if you do not already have it:
+Install `cargo-deny` and `gitleaks` if you do not already have them:
 
 ```bash
 cargo install --locked cargo-deny
+brew install gitleaks
 ```
 
 Before opening a pull request, run:
@@ -31,7 +32,7 @@ cargo test
 cargo deny check
 ```
 
-The configured pre-commit hook and GitHub Actions CI run the same verification and will block merges or local commits if any of those checks fail.
+The configured pre-commit hook scans staged changes with `gitleaks git --staged --redact --no-banner` before running `./scripts/verify.sh`. GitHub Actions CI runs `./scripts/verify.sh` and will block merges if any verification check fails.
 
 ## AI Assistance
 

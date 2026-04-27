@@ -5,6 +5,9 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+pub(crate) const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum DevcontainerInstaller {
@@ -40,10 +43,18 @@ pub(crate) fn ensure_command(program: &str) -> Result<()> {
 pub(crate) fn ensure_docker_daemon() -> Result<()> {
     ensure_command("docker")?;
 
-    let output = new_command("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .output()
-        .context("failed to probe the Docker daemon")?;
+    let Some(output) = command_output_with_timeout(
+        "docker",
+        &["version", "--format", "{{.Server.Version}}"],
+        DOCKER_PROBE_TIMEOUT,
+    )?
+    else {
+        print_docker_daemon_help();
+        bail!(
+            "Docker is installed, but the daemon did not respond within {} seconds",
+            DOCKER_PROBE_TIMEOUT.as_secs()
+        )
+    };
 
     if output.status.success() {
         return Ok(());
@@ -258,6 +269,49 @@ pub(crate) fn command_output_in_dir(
         .with_context(|| format!("failed to run {}", render_command(program, args)))
 }
 
+pub(crate) fn command_output_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Option<Output>> {
+    let mut child = new_command(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run {}", render_command(program, args)))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child.wait_with_output().map(Some).with_context(|| {
+                    format!(
+                        "failed to read output from {}",
+                        render_command(program, args)
+                    )
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to check status of {}",
+                        render_command(program, args)
+                    )
+                });
+            }
+        }
+    }
+}
+
 pub(crate) fn render_command<I, S>(program: &str, args: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -449,6 +503,32 @@ mod tests {
         );
         assert!(candidates.contains(&PathBuf::from("/nix/profile/bin")));
         assert!(candidates.contains(&PathBuf::from("/run/current-system/sw/bin")));
+    }
+
+    #[test]
+    fn command_output_with_timeout_returns_output_for_fast_command() {
+        let output = super::command_output_with_timeout(
+            "echo",
+            &["hello"],
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let output = output.expect("command should complete within timeout");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn command_output_with_timeout_returns_none_on_timeout() {
+        let output = super::command_output_with_timeout(
+            "sleep",
+            &["30"],
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+
+        assert!(output.is_none(), "timed-out command should return None");
     }
 
     #[cfg(unix)]

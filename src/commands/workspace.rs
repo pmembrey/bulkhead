@@ -80,6 +80,10 @@ pub(crate) fn maybe_bootstrap_workspace(workspace: &Path) -> Result<()> {
 }
 
 pub(crate) fn warn_rebuild_if_running(workspace: &Path, what: &str) -> Result<()> {
+    if !docker_daemon_running() {
+        return Ok(());
+    }
+
     if find_container_id(workspace, false)?.is_some() {
         println!("The container is currently running. Run `bulkhead rebuild` to apply {what}.");
     }
